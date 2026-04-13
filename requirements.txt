@@ -1,0 +1,6 @@
+langgraph
+langchain
+langchain-community
+langchain-experimental
+python-dotenv
+langchain-xai
