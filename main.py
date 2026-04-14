@@ -4,7 +4,7 @@ from langchain_core.messages import HumanMessage
 import asyncio
 
 async def main():
-    print("🧪 Welcome to MathForge (powered by Grok)! Type 'exit' to quit.\n")
+    print("🧪 Welcome to MathForge (powered by Claude)! Type 'exit' to quit.")
     while True:
         query = input("You: ")
         if query.lower() in ["exit", "quit"]:
