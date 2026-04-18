@@ -1,4 +1,18 @@
-"""CLI entrypoint: streaming ReAct loop with optional verbose tool logging."""
+"""Interactive CLI: read stdin, run the LangGraph agent, print replies.
+
+Flow:
+1. ``load_dotenv()`` loads ``.env`` into the environment (does not override
+   variables already set in the shell unless you change that in python-dotenv).
+2. ``load_settings()`` validates ``ANTHROPIC_API_KEY`` and reads MathForge options.
+3. Workspace and timeout from ``Settings`` are written to ``MATHFORGE_*`` so
+   ``tools.execute_python_code`` sees the same values without importing ``config``
+   at tool definition time.
+4. Each user line is one graph invocation (stateless across lines unless you add
+   memory/checkpointers later).
+
+Streaming uses LangGraph ``stream_mode="messages"``, which yields ``(message, metadata)``
+tuples as the graph runs. We print assistant tokens and optionally tool results.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +36,7 @@ from config import load_settings
 
 
 def _configure_logging(level: str) -> None:
+    """Initialize the root logger once; level names match ``logging`` constants."""
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
@@ -29,6 +44,7 @@ def _configure_logging(level: str) -> None:
 
 
 def _print_tool_event(message: ToolMessage, *, verbose: bool) -> None:
+    """Echo tool output when ``--verbose`` is set (can be large; we cap preview)."""
     if not verbose:
         return
     name = getattr(message, "name", "tool")
@@ -38,13 +54,14 @@ def _print_tool_event(message: ToolMessage, *, verbose: bool) -> None:
 
 
 def _emit_ai_text(message: BaseMessage) -> None:
+    """Print assistant-visible text; handles string content and simple multimodal blocks."""
     content = getattr(message, "content", None)
     if not content:
         return
     if isinstance(content, str):
         print(content, end="", flush=True)
         return
-    # Multimodal content blocks
+    # Claude may return structured content blocks; we only surface text parts.
     for block in content:
         if isinstance(block, dict) and block.get("type") == "text":
             print(block.get("text", ""), end="", flush=True)
@@ -60,6 +77,7 @@ async def run_turn(
     stream: bool,
     verbose: bool,
 ) -> None:
+    """Run one user query through the compiled graph (streaming or whole-message)."""
     input_state = {"messages": [HumanMessage(content=query)]}
     config = {"recursion_limit": recursion_limit}
 
@@ -70,6 +88,8 @@ async def run_turn(
         return
 
     print("MathForge: ", end="", flush=True)
+    # If the model streams chunks, we avoid printing the final full AIMessage again
+    # (would duplicate text). Non-streaming models only emit AIMessage → we print once.
     streamed_text = False
     async for item in agent.astream(input_state, config=config, stream_mode="messages"):
         if not isinstance(item, tuple) or not item:
@@ -87,6 +107,7 @@ async def run_turn(
 
 
 async def async_main(argv: list[str] | None = None) -> int:
+    """Parse CLI args, build the agent, run the REPL loop. Returns a process exit code."""
     load_dotenv()
     parser = argparse.ArgumentParser(description="MathForge — Claude + sandboxed Python")
     parser.add_argument(
@@ -107,6 +128,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
 
+    # Keep tools and Settings aligned (tools read env at invocation time).
     os.environ["MATHFORGE_WORKSPACE_ROOT"] = settings.workspace_root
     os.environ["MATHFORGE_CODE_TIMEOUT_SEC"] = str(settings.code_timeout_sec)
 
@@ -145,12 +167,13 @@ async def async_main(argv: list[str] | None = None) -> int:
             )
         except TimeoutError:
             print("Request timed out.", file=sys.stderr)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — network/API errors land here
             logging.exception("Agent run failed")
             print(f"Error: {exc}", file=sys.stderr)
 
 
 def main() -> None:
+    """Setuptools console-script entrypoint."""
     sys.exit(asyncio.run(async_main()))
 
 

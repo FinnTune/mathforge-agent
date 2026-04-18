@@ -1,4 +1,9 @@
-"""Tests for agent graph construction and ReAct loop (mocked LLM)."""
+"""Tests for ``agent.build_react_agent`` and ``build_llm``.
+
+Uses ``ScriptedToolModel`` so no Anthropic API calls occur. Verifies tool-then-
+answer ReAct flow, streaming smoke, and that ``max_tokens`` is forwarded to
+``ChatAnthropic`` when set.
+"""
 
 from __future__ import annotations
 

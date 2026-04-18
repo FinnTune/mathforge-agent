@@ -1,4 +1,8 @@
-"""Tests for configuration loading."""
+"""Tests for ``config.load_settings`` and ``Settings``.
+
+Covers required API key validation, env parsing edge cases (empty strings,
+whitespace), and direct dataclass construction for non-env scenarios.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,9 @@
-"""Tests for subprocess code sandbox."""
+"""Integration-style tests for ``sandbox.run_python_code_isolated``.
+
+Each test exercises a real subprocess (same interpreter as pytest). Covers
+happy path, timeouts, stderr on failure, env isolation from the parent, Matplotlib
+Agg saves, and output truncation.
+"""
 
 from __future__ import annotations
 
