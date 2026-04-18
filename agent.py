@@ -1,22 +1,21 @@
-# agent.py
-from langgraph.prebuilt import create_react_agent
+"""LangGraph ReAct agent (Claude + code execution tool)."""
+
+from __future__ import annotations
+
+import logging
+
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from dotenv import load_dotenv
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.prebuilt import create_react_agent
+
+from config import Settings
 from tools import execute_python_code
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-# Claude Sonnet 4.6 – current best balance of intelligence + speed + cost (April 2026)
-llm = ChatAnthropic(
-    model="claude-sonnet-4-6",      # ← Updated to current model
-    temperature=0
-)
-
-tools = [execute_python_code]
-
-# Correct prompt structure for Claude
-system_prompt = """You are MathForge, an expert mathematician and Python coder powered by Claude.
+SYSTEM_PROMPT = """You are MathForge, an expert mathematician and Python coder powered by Claude.
 Your job is to solve math and coding problems using clear reasoning.
 Always:
 1. Think step-by-step.
@@ -27,17 +26,36 @@ Always:
 Use SymPy for symbolic math, NumPy/SciPy for numerics, Matplotlib for plots.
 Never guess — always execute code to confirm."""
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    MessagesPlaceholder(variable_name="messages"),
-])
 
-# Create the ReAct agent
-agent = create_react_agent(
-    model=llm,
-    tools=tools,
-    prompt=prompt,
-    debug=False
-)
+def build_llm(settings: Settings) -> BaseChatModel:
+    """Construct the chat model from settings."""
+    params: dict = {
+        "model": settings.model,
+        "temperature": settings.temperature,
+        "api_key": settings.anthropic_api_key,
+    }
+    if settings.max_tokens is not None:
+        params["max_tokens"] = settings.max_tokens
+    return ChatAnthropic(**params)
 
-print("✅ MathForge agent loaded successfully with Claude Sonnet 4.6!")
+
+def build_react_agent(
+    settings: Settings,
+    llm: BaseChatModel | None = None,
+) -> CompiledStateGraph:
+    """Create the compiled LangGraph agent."""
+    model = llm or build_llm(settings)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    )
+    graph = create_react_agent(
+        model=model,
+        tools=[execute_python_code],
+        prompt=prompt,
+        debug=False,
+    )
+    logger.info("MathForge agent built (model=%s)", settings.model)
+    return graph

@@ -2,6 +2,7 @@
 .env
 
 # Python
+.venv/
 venv/
 __pycache__/
 *.pyc
@@ -26,6 +27,7 @@ wheels/
 
 # Output folders
 plots/
+.matplotlib/
 
 # Logs
 *.log
