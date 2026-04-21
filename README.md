@@ -82,3 +82,5 @@ CI runs Ruff and pytest on Python 3.11–3.13.
 ## Requirements
 
 Python **3.11+**. Dependencies are declared in `pyproject.toml` (scientific stack: NumPy, SciPy, SymPy, Matplotlib for the sandbox preamble).
+
+Copyright (c) 2026 MathForge contributors.
