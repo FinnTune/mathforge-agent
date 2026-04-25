@@ -83,4 +83,9 @@ CI runs Ruff and pytest on Python 3.11–3.13.
 
 Python **3.11+**. Dependencies are declared in `pyproject.toml` (scientific stack: NumPy, SciPy, SymPy, Matplotlib for the sandbox preamble).
 
-Copyright (c) 2026 MathForge contributors.
+## License
+
+Copyright (C) 2026 Andre Teetor
+
+This project is licensed under the GNU General Public License v2.0 —
+see the [LICENSE](LICENSE) file for details.
