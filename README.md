@@ -67,8 +67,45 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_WORKSPACE_ROOT` | Working directory for code execution and `plots/`. |
 | `MATHFORGE_CODE_TIMEOUT_SEC` | Per-execution timeout in the subprocess. |
 | `MATHFORGE_LOG_LEVEL` | `logging` level for the app. |
+| `DISCORD_BOT_TOKEN` | Required only for `mathforge-discord`. |
+| `DISCORD_ALLOWED_CHANNEL_IDS` | Optional comma-separated channel allowlist. |
+| `DISCORD_MAX_PROMPT_CHARS` | Prompt-length guardrail for slash command input. |
+| `DISCORD_USER_COOLDOWN_SEC` | Optional per-user cooldown for Discord usage. |
+| `DISCORD_DEV_GUILD_ID` | Optional guild ID for faster command syncing in development. |
 
 Optional **LangSmith** tracing: set `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, and `LANGCHAIN_PROJECT` as in the LangChain docs.
+
+## Discord integration
+
+MathForge can run as a Discord slash-command bot using the same agent and sandbox.
+
+1. Create a Discord app/bot in the Discord Developer Portal.
+2. Copy the bot token to `.env` as `DISCORD_BOT_TOKEN=...`.
+3. Invite the bot with scopes `bot` and `applications.commands`.
+4. Run:
+
+```bash
+mathforge-discord
+```
+
+or:
+
+```bash
+python discord_bot.py
+```
+
+Then call it in Discord:
+
+```text
+/mathforge query: Solve x^2 - 5x + 6 = 0 and explain each step.
+```
+
+Recommended safety settings in `.env`:
+
+- `DISCORD_ALLOWED_CHANNEL_IDS` to restrict usage to known channels.
+- `DISCORD_MAX_PROMPT_CHARS` to cap prompt length.
+- `DISCORD_USER_COOLDOWN_SEC` to avoid spam.
+- `DISCORD_DEV_GUILD_ID` during development for fast command sync.
 
 ## Development
 
