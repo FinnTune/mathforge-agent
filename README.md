@@ -28,6 +28,13 @@ CLI options:
 
 You can also run `mathforge` if the venv’s `bin` is on your `PATH` (console script from `pyproject.toml`).
 
+### Conversation memory
+
+The CLI and Discord bot remember earlier turns in a session (e.g. "now plot that", "solve it symbolically instead"), backed by an in-memory LangGraph checkpointer. Memory lives only in the running process — it's lost on restart and never written to disk.
+
+- **CLI:** one conversation per run. Type `reset` at the `You:` prompt to start a fresh thread.
+- **Discord:** one conversation per user per channel. Add `reset:true` to `/mathforge` to clear it (optionally combined with a new `query` in the same call).
+
 ## Example queries
 
 After the prompt `You:`, try pasting one of these (the agent will run Python in the sandbox and explain the result):
@@ -99,6 +106,8 @@ Then call it in Discord:
 ```text
 /mathforge query: Solve x^2 - 5x + 6 = 0 and explain each step.
 ```
+
+Follow-ups in the same channel remember prior turns; use `/mathforge reset:true` to start over (see [Conversation memory](#conversation-memory)).
 
 Recommended safety settings in `.env`:
 

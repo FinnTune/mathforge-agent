@@ -11,6 +11,7 @@ from discord_bot import (
     coerce_content_to_text,
     is_channel_allowed,
     parse_allowed_channel_ids,
+    thread_key,
 )
 
 
@@ -50,3 +51,15 @@ def test_coerce_content_to_text_variants() -> None:
         coerce_content_to_text([{"type": "text", "text": "hi"}, {"type": "x", "text": "skip"}])
         == "hi"
     )
+
+
+def test_thread_key_scopes_by_channel_user_and_generation() -> None:
+    assert thread_key(100, 200, 0) == "100:200:0"
+    assert thread_key(100, 200, 1) != thread_key(100, 200, 0)
+    assert thread_key(100, 200, 0) != thread_key(101, 200, 0)
+    assert thread_key(100, 200, 0) != thread_key(100, 201, 0)
+
+
+def test_thread_key_handles_missing_channel() -> None:
+    # DMs / channel-less interactions: channel_id may be None.
+    assert thread_key(None, 200, 0) == "None:200:0"
