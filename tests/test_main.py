@@ -40,6 +40,21 @@ class _FakeToolStreamAgent:
         yield (AIMessageChunk(content="Done."), {})
 
 
+class _CapturingAgent:
+    """Records the ``config`` passed by ``run_turn`` (checks thread_id plumbing)."""
+
+    def __init__(self) -> None:
+        self.configs: list[dict | None] = []
+
+    async def astream(self, input_state, config=None, stream_mode=None):
+        self.configs.append(config)
+        yield (AIMessageChunk(content="ok"), {})
+
+    async def ainvoke(self, input_state, config=None):
+        self.configs.append(config)
+        return {"messages": [HumanMessage("q"), AIMessage(content="ok")]}
+
+
 @pytest.mark.asyncio
 async def test_run_turn_stream(capsys: pytest.CaptureFixture[str]) -> None:
     await run_turn(
@@ -77,6 +92,61 @@ async def test_run_turn_verbose_tool(capsys: pytest.CaptureFixture[str]) -> None
     out = capsys.readouterr().out
     assert "[tool:execute_python_code]" in out
     assert "print(1)" in out
+
+
+@pytest.mark.asyncio
+async def test_run_turn_streaming_passes_thread_id() -> None:
+    agent = _CapturingAgent()
+    await run_turn(agent, "q", recursion_limit=5, stream=True, verbose=False, thread_id="abc")
+    assert agent.configs[0]["configurable"]["thread_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_no_stream_passes_thread_id() -> None:
+    agent = _CapturingAgent()
+    await run_turn(agent, "q", recursion_limit=5, stream=False, verbose=False, thread_id="xyz")
+    assert agent.configs[0]["configurable"]["thread_id"] == "xyz"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_omits_configurable_without_thread_id() -> None:
+    agent = _CapturingAgent()
+    await run_turn(agent, "q", recursion_limit=5, stream=False, verbose=False)
+    assert "configurable" not in agent.configs[0]
+
+
+@pytest.mark.asyncio
+async def test_async_main_reset_command_starts_new_thread(monkeypatch) -> None:
+    """Typing 'reset' between two queries changes the thread_id sent to the agent."""
+    from config import Settings
+
+    agent = _CapturingAgent()
+    monkeypatch.setattr(main_module, "load_dotenv", lambda *_, **__: None)
+    monkeypatch.setattr(
+        main_module,
+        "load_settings",
+        lambda: Settings(
+            anthropic_api_key="test-key",
+            model="claude-sonnet-4-6",
+            temperature=0.0,
+            max_tokens=None,
+            recursion_limit=15,
+            code_timeout_sec=5.0,
+            workspace_root=".",
+            log_level="DEBUG",
+        ),
+    )
+    monkeypatch.setattr(main_module, "build_react_agent", lambda settings, checkpointer=None: agent)
+
+    inputs = iter(["hi", "reset", "hi again", "exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    code = await async_main([])
+
+    assert code == 0
+    thread_ids = [c["configurable"]["thread_id"] for c in agent.configs]
+    assert len(thread_ids) == 2
+    assert thread_ids[0] != thread_ids[1]
 
 
 @pytest.mark.asyncio

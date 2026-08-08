@@ -7,6 +7,12 @@ prompt stays fixed while chat history grows.
 
 ``build_react_agent(..., llm=...)`` accepts an optional model for tests
 (``tests.helpers.ScriptedToolModel``) so CI does not call Anthropic.
+
+``build_react_agent(..., checkpointer=...)`` wires up LangGraph state
+persistence so a conversation can span multiple turns. Callers must invoke the
+compiled graph with ``config={"configurable": {"thread_id": ...}}`` for memory
+to apply; without a checkpointer the graph stays stateless (one turn in, one
+turn out), which is what the existing test suite relies on.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import logging
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -52,12 +59,16 @@ def build_llm(settings: Settings) -> BaseChatModel:
 def build_react_agent(
     settings: Settings,
     llm: BaseChatModel | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     """Compile and return the LangGraph agent graph.
 
     Args:
         settings: Used for logging and default LLM construction.
         llm: If provided, used instead of ``ChatAnthropic`` (testing / mocking).
+        checkpointer: If provided, the graph persists message history per
+            ``thread_id`` across ``ainvoke``/``astream`` calls (conversation
+            memory). Omit for a stateless graph (each call is independent).
     """
     model = llm or build_llm(settings)
     prompt = ChatPromptTemplate.from_messages(
@@ -71,7 +82,12 @@ def build_react_agent(
         model=model,
         tools=[execute_python_code],
         prompt=prompt,
+        checkpointer=checkpointer,
         debug=False,
     )
-    logger.info("MathForge agent built (model=%s)", settings.model)
+    logger.info(
+        "MathForge agent built (model=%s, memory=%s)",
+        settings.model,
+        checkpointer is not None,
+    )
     return graph

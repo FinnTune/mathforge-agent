@@ -83,3 +83,64 @@ def test_build_llm_uses_max_tokens(dummy_settings) -> None:
         build_llm(s)
         kwargs = mock_cls.call_args.kwargs
         assert kwargs["max_tokens"] == 123
+
+
+@pytest.mark.asyncio
+async def test_checkpointer_persists_history_across_turns(dummy_settings) -> None:
+    """Same thread_id: the second turn's state includes both human messages."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    model = ScriptedToolModel(
+        [
+            AIMessage(content="First answer."),
+            AIMessage(content="Second answer, building on the first."),
+        ]
+    )
+    agent = build_react_agent(dummy_settings, llm=model, checkpointer=InMemorySaver())
+    config = {
+        "configurable": {"thread_id": "t1"},
+        "recursion_limit": dummy_settings.recursion_limit,
+    }
+
+    await agent.ainvoke({"messages": [HumanMessage("First question")]}, config=config)
+    result = await agent.ainvoke({"messages": [HumanMessage("Second question")]}, config=config)
+
+    humans = [m for m in result["messages"] if isinstance(m, HumanMessage)]
+    assert len(humans) == 2
+    assert "Second answer" in str(result["messages"][-1].content)
+
+
+@pytest.mark.asyncio
+async def test_checkpointer_isolates_different_threads(dummy_settings) -> None:
+    """Different thread_id: no history bleeds from one conversation into another."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    model = ScriptedToolModel([AIMessage(content="Answer.")])
+    agent = build_react_agent(dummy_settings, llm=model, checkpointer=InMemorySaver())
+    recursion_limit = dummy_settings.recursion_limit
+
+    await agent.ainvoke(
+        {"messages": [HumanMessage("Q1")]},
+        config={"configurable": {"thread_id": "a"}, "recursion_limit": recursion_limit},
+    )
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage("Q2")]},
+        config={"configurable": {"thread_id": "b"}, "recursion_limit": recursion_limit},
+    )
+
+    humans = [m for m in result["messages"] if isinstance(m, HumanMessage)]
+    assert len(humans) == 1
+
+
+@pytest.mark.asyncio
+async def test_without_checkpointer_each_call_is_stateless(dummy_settings) -> None:
+    """No checkpointer passed (default None): behavior matches pre-memory graphs."""
+    model = ScriptedToolModel([AIMessage(content="Answer.")])
+    agent = build_react_agent(dummy_settings, llm=model)
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage("Q1")]},
+        config={"recursion_limit": dummy_settings.recursion_limit},
+    )
+    humans = [m for m in result["messages"] if isinstance(m, HumanMessage)]
+    assert len(humans) == 1

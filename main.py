@@ -7,8 +7,10 @@ Flow:
 3. Workspace and timeout from ``Settings`` are written to ``MATHFORGE_*`` so
    ``tools.execute_python_code`` sees the same values without importing ``config``
    at tool definition time.
-4. Each user line is one graph invocation (stateless across lines unless you add
-   memory/checkpointers later).
+4. The agent is built with an in-memory checkpointer keyed by a per-session
+   ``thread_id``, so the REPL remembers earlier turns ("plot that", "now solve
+   it symbolically"). Typing ``reset`` starts a fresh thread. Memory lives only
+   for the lifetime of the process — nothing is persisted to disk.
 
 Streaming uses LangGraph ``stream_mode="messages"``, which yields ``(message, metadata)``
 tuples as the graph runs. We print assistant tokens and optionally tool results.
@@ -21,6 +23,7 @@ import asyncio
 import logging
 import os
 import sys
+import uuid
 
 from dotenv import load_dotenv
 from langchain_core.messages import (
@@ -30,6 +33,7 @@ from langchain_core.messages import (
     HumanMessage,
     ToolMessage,
 )
+from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import build_react_agent
 from config import load_settings
@@ -76,10 +80,18 @@ async def run_turn(
     recursion_limit: int,
     stream: bool,
     verbose: bool,
+    thread_id: str | None = None,
 ) -> None:
-    """Run one user query through the compiled graph (streaming or whole-message)."""
+    """Run one user query through the compiled graph (streaming or whole-message).
+
+    ``thread_id`` scopes conversation memory when the agent was built with a
+    checkpointer; only the new ``HumanMessage`` is sent each turn and prior
+    history is loaded from the checkpoint. Omit for a stateless call (tests).
+    """
     input_state = {"messages": [HumanMessage(content=query)]}
-    config = {"recursion_limit": recursion_limit}
+    config: dict = {"recursion_limit": recursion_limit}
+    if thread_id is not None:
+        config["configurable"] = {"thread_id": thread_id}
 
     if not stream:
         result = await agent.ainvoke(input_state, config=config)
@@ -134,14 +146,15 @@ async def async_main(argv: list[str] | None = None) -> int:
 
     _configure_logging(settings.log_level)
     try:
-        agent = build_react_agent(settings)
+        agent = build_react_agent(settings, checkpointer=InMemorySaver())
     except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
         logging.exception("Failed to build agent")
         print(f"Could not start agent: {exc}", file=sys.stderr)
         return 1
 
     stream = not args.no_stream
-    print("Welcome to MathForge (Claude + subprocess sandbox). Commands: exit, quit.\n")
+    thread_id = str(uuid.uuid4())
+    print("Welcome to MathForge (Claude + subprocess sandbox). Commands: exit, quit, reset.\n")
     while True:
         try:
             query = input("You: ")
@@ -153,6 +166,10 @@ async def async_main(argv: list[str] | None = None) -> int:
         if stripped.lower() in {"exit", "quit"}:
             print("Goodbye!")
             return 0
+        if stripped.lower() == "reset":
+            thread_id = str(uuid.uuid4())
+            print("Conversation memory cleared.\n")
+            continue
         if not stripped:
             continue
 
@@ -164,6 +181,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                 recursion_limit=settings.recursion_limit,
                 stream=stream,
                 verbose=args.verbose,
+                thread_id=thread_id,
             )
         except TimeoutError:
             print("Request timed out.", file=sys.stderr)
