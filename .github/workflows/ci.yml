@@ -61,3 +61,26 @@ jobs:
         env:
           MATHFORGE_SANDBOX_PYTHON: ${{ github.workspace }}/mcp-servers/sandbox-rs/.venv-sandbox-test/bin/python
         run: cargo test
+
+  mathkb-py:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-servers/mathkb-py
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check .
+      # No Docker/Qdrant and no VOYAGE_API_KEY needed: tests use qdrant-client's
+      # embedded (":memory:") mode and a fake, deterministic embedder.
+      - name: Pytest
+        run: pytest -q

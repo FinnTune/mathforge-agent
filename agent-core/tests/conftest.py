@@ -23,4 +23,10 @@ def dummy_settings(tmp_path) -> Settings:
         sandbox_python="python3",
         sandbox_max_memory_mb=512,
         sandbox_max_output_bytes=256_000,
+        mathkb_mcp_python="/nonexistent/mathkb-python",
+        mathkb_mcp_script="/nonexistent/server.py",
+        qdrant_url="http://localhost:6333",
+        qdrant_collection="test-notes",
+        voyage_api_key="test-key-not-used",
+        voyage_model="voyage-3-lite",
     )

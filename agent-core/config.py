@@ -15,16 +15,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def _default_sandbox_mcp_bin() -> str:
     """Path to the compiled Rust sandbox MCP server, relative to this repo checkout."""
     return str(
-        Path(__file__).resolve().parent.parent
-        / "mcp-servers"
-        / "sandbox-rs"
-        / "target"
-        / "release"
-        / "mathforge-sandbox-mcp"
+        _repo_root() / "mcp-servers" / "sandbox-rs" / "target" / "release" / "mathforge-sandbox-mcp"
     )
+
+
+def _default_mathkb_mcp_python() -> str:
+    """Path to the mathkb server's own venv interpreter, relative to this repo checkout."""
+    return str(_repo_root() / "mcp-servers" / "mathkb-py" / ".venv" / "bin" / "python")
+
+
+def _default_mathkb_mcp_script() -> str:
+    return str(_repo_root() / "mcp-servers" / "mathkb-py" / "server.py")
 
 
 def _env_int(key: str, default: int) -> int:
@@ -65,6 +73,13 @@ class Settings:
     sandbox_python: str
     sandbox_max_memory_mb: int
     sandbox_max_output_bytes: int
+    # RAG MCP server (mcp-servers/mathkb-py), spawned over stdio like the sandbox.
+    mathkb_mcp_python: str
+    mathkb_mcp_script: str
+    qdrant_url: str
+    qdrant_collection: str
+    voyage_api_key: str
+    voyage_model: str
 
 
 def load_settings() -> Settings:
@@ -94,4 +109,10 @@ def load_settings() -> Settings:
         sandbox_python=os.getenv("MATHFORGE_SANDBOX_PYTHON", "python3"),
         sandbox_max_memory_mb=_env_int("MATHFORGE_SANDBOX_MAX_MEMORY_MB", 512),
         sandbox_max_output_bytes=_env_int("MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES", 256_000),
+        mathkb_mcp_python=os.getenv("MATHFORGE_MATHKB_MCP_PYTHON", _default_mathkb_mcp_python()),
+        mathkb_mcp_script=os.getenv("MATHFORGE_MATHKB_MCP_SCRIPT", _default_mathkb_mcp_script()),
+        qdrant_url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        qdrant_collection=os.getenv("QDRANT_COLLECTION", "mathforge-math-notes"),
+        voyage_api_key=os.getenv("VOYAGE_API_KEY", ""),
+        voyage_model=os.getenv("VOYAGE_MODEL", "voyage-3-lite"),
     )

@@ -1,6 +1,6 @@
 # MathForge — LangGraph + Claude math and code agent
 
-A ReAct-style agent built with **LangGraph** and **Claude (Anthropic)**. It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, and explaining the results.
+A ReAct-style agent built with **LangGraph** and **Claude (Anthropic)**. It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, and explaining the results.
 
 ## Architecture
 
@@ -9,11 +9,14 @@ MathForge is a polyglot monorepo, one directory per component:
 ```
 agent-core/          Python — LangGraph ReAct agent, CLI, Discord bot
 mcp-servers/
-  sandbox-rs/         Rust — MCP server that executes model-generated Python
-                       in a resource-limited subprocess (the trust boundary)
+  sandbox-rs/         Rust MCP server — executes model-generated Python in a
+                       resource-limited subprocess (the trust boundary)
+  mathkb-py/          Python MCP server — search_math_knowledge, retrieval
+                       over a Qdrant-backed corpus of reference notes
+docker-compose.yml    Qdrant (vector store behind mathkb-py)
 ```
 
-`agent-core` talks to `sandbox-rs` as an **MCP client** (`langchain-mcp-adapters`), over stdio — the same transport pattern Claude Desktop uses to run local MCP servers. This is in-progress toward a larger rearchitecture (RAG tool server, a hand-rolled multi-node LangGraph, a gRPC service layer); see commit history for what's landed.
+`agent-core` talks to both `sandbox-rs` and `mathkb-py` as an **MCP client** (`langchain-mcp-adapters`), over stdio — the same transport pattern Claude Desktop uses to run local MCP servers. This is in-progress toward a larger rearchitecture (a hand-rolled multi-node LangGraph, a gRPC service layer); see commit history for what's landed.
 
 ## Security model
 
@@ -34,14 +37,30 @@ cargo build --release --manifest-path mcp-servers/sandbox-rs/Cargo.toml
 python3 -m venv mcp-servers/sandbox-rs/.venv
 mcp-servers/sandbox-rs/.venv/bin/pip install -r mcp-servers/sandbox-rs/requirements.txt
 
-# 2. Set up agent-core (Python)
+# 2. Set up the RAG knowledge base server (Python) and its vector store
+python3 -m venv mcp-servers/mathkb-py/.venv
+mcp-servers/mathkb-py/.venv/bin/pip install -e mcp-servers/mathkb-py
+docker compose up -d qdrant
+
+# 3. Set up agent-core (Python)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e "./agent-core[dev]"
 cp .env.example .env
-# Set ANTHROPIC_API_KEY in .env, and point MATHFORGE_SANDBOX_PYTHON at the venv from step 1:
+# Set ANTHROPIC_API_KEY and VOYAGE_API_KEY in .env, and point MATHFORGE_SANDBOX_PYTHON
+# at the venv from step 1:
 #   MATHFORGE_SANDBOX_PYTHON=mcp-servers/sandbox-rs/.venv/bin/python
+
+# 4. Embed the knowledge base corpus into Qdrant (needs VOYAGE_API_KEY set above)
+set -a && source .env && set +a
+mcp-servers/mathkb-py/.venv/bin/python mcp-servers/mathkb-py/ingest.py
+
 python agent-core/main.py
 ```
+
+Steps 2 and 4 (the RAG server/knowledge base) are optional — without them the
+`search_math_knowledge` tool still loads but every call returns a clear
+credentials/connection error, and the agent gracefully falls back to
+answering from `execute_python` alone (see [RAG knowledge base](#rag-knowledge-base)).
 
 CLI options:
 
@@ -83,6 +102,19 @@ After the prompt `You:`, try pasting one of these (the agent will run Python in 
 
 Use `python agent-core/main.py --verbose` if you want to see tool output (stdout from executed code) in the terminal as well.
 
+## RAG knowledge base
+
+`mcp-servers/mathkb-py` is a second MCP server exposing one tool,
+`search_math_knowledge`. It retrieves from a small, **self-authored**
+corpus of reference notes (`mcp-servers/mathkb-py/corpus/*.md` — linear
+algebra, SciPy integration, SymPy, Matplotlib, general numerical patterns;
+not scraped/copied docs, so there's no licensing question) embedded with
+**Voyage AI** (`voyage-3-lite`) and stored in **Qdrant**.
+
+- **Ingest** (run once, or after editing `corpus/`): `python mcp-servers/mathkb-py/ingest.py` — chunks the corpus, embeds it, and upserts into the `QDRANT_COLLECTION` collection. Idempotent — re-running on an unchanged corpus overwrites in place rather than duplicating.
+- **Try it:** ask something close to one of the corpus notes, e.g. `What does scipy.integrate.quad return, and how do I check its accuracy?` — `--verbose` shows the raw retrieved snippet(s) with source/section/score, and the final answer cites the source file.
+- **Graceful degradation:** if Qdrant is unreachable or `VOYAGE_API_KEY` is unset/invalid, `search_math_knowledge` still loads as a tool (listing tool schemas doesn't touch Voyage) but returns a clear error string when called — `langchain-mcp-adapters` surfaces this as a normal tool result, not a crash, so the model just explains it couldn't check its notes and answers from `execute_python` alone.
+
 ## Configuration
 
 See `.env.example`. Notable variables:
@@ -100,6 +132,12 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_SANDBOX_PYTHON` | Python interpreter the sandbox invokes (needs numpy/sympy/matplotlib/scipy). |
 | `MATHFORGE_SANDBOX_MAX_MEMORY_MB` | Sandbox `RLIMIT_AS` cap in MB. |
 | `MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES` | Cap on captured sandbox stdout+stderr. |
+| `VOYAGE_API_KEY` | Required to actually retrieve anything via `search_math_knowledge` / to run `ingest.py`. |
+| `VOYAGE_MODEL` | Voyage embedding model (default `voyage-3-lite`). |
+| `QDRANT_URL` | Qdrant REST endpoint (default `http://localhost:6333`). |
+| `QDRANT_COLLECTION` | Qdrant collection name (default `mathforge-math-notes`). |
+| `MATHFORGE_MATHKB_MCP_PYTHON` | Interpreter for the mathkb MCP server. |
+| `MATHFORGE_MATHKB_MCP_SCRIPT` | Path to `mcp-servers/mathkb-py/server.py`. |
 | `MATHFORGE_LOG_LEVEL` | `logging` level for the app. |
 | `DISCORD_BOT_TOKEN` | Required only for `mathforge-discord`. |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | Optional comma-separated channel allowlist. |
@@ -156,13 +194,19 @@ ANTHROPIC_API_KEY=dummy-for-ci pytest -q
 cd mcp-servers/sandbox-rs
 cargo clippy --all-targets -- -D warnings
 MATHFORGE_SANDBOX_PYTHON=/path/to/venv/bin/python cargo test
+
+# mcp-servers/mathkb-py (Python) — no Docker/Voyage key needed, tests use
+# qdrant-client's embedded (":memory:") mode and a fake embedder
+cd mcp-servers/mathkb-py
+ruff check .
+pytest -q
 ```
 
-CI runs both: Ruff + pytest on Python 3.11–3.13 for `agent-core`, and `cargo clippy`/`cargo test` for `sandbox-rs`.
+CI runs three jobs: Ruff + pytest on Python 3.11–3.13 for both `agent-core` and `mathkb-py`, and `cargo clippy`/`cargo test` for `sandbox-rs`.
 
 ## Requirements
 
-Python **3.11+** for `agent-core`, Rust (stable) for `mcp-servers/sandbox-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` and `requirements.txt`).
+Python **3.11+** for `agent-core` and `mcp-servers/mathkb-py`, Rust (stable) for `mcp-servers/sandbox-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at, and Docker (for Qdrant) if you want the RAG knowledge base live. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` + `requirements.txt`, `mcp-servers/mathkb-py/pyproject.toml`).
 
 ## License
 

@@ -10,10 +10,11 @@ prompt stays fixed while chat history grows.
 
 ``build_react_agent(..., tools=...)`` accepts an explicit tool list (same
 override pattern as ``llm``). Production callers resolve the real tools from
-the Rust sandbox MCP server via ``mcp_client.load_sandbox_tools`` and pass
-them in; tests pass a lightweight in-process stand-in
-(``tests.helpers.make_fake_execute_python_tool``) so the graph/checkpointer
-tests don't need the compiled Rust binary.
+the sandbox and mathkb MCP servers via ``mcp_client.load_mcp_tools`` and pass
+them in; tests pass lightweight in-process stand-ins
+(``tests.helpers.make_fake_execute_python_tool``,
+``make_fake_search_math_knowledge_tool``) so the graph/checkpointer tests
+don't need either MCP server running.
 
 ``build_react_agent(..., checkpointer=...)`` wires up LangGraph state
 persistence so a conversation can span multiple turns. Callers must invoke the
@@ -38,15 +39,18 @@ from config import Settings
 
 logger = logging.getLogger(__name__)
 
-# Instructions to the model: favor tool use for verification; aligns with sandbox capabilities.
+# Instructions to the model: favor tool use for verification; aligns with sandbox/mathkb tools.
 SYSTEM_PROMPT = """You are MathForge, an expert mathematician and Python coder powered by Claude.
 Your job is to solve math and coding problems using clear reasoning.
 Always:
 1. Think step-by-step.
-2. Write clean, correct Python code.
-3. Execute it with the execute_python tool.
-4. Verify the result.
-5. Give a friendly, educational final answer with explanations.
+2. If unsure of the right approach or a library's exact API, call
+   search_math_knowledge first to check MathForge's reference notes.
+3. Write clean, correct Python code.
+4. Execute it with the execute_python tool.
+5. Verify the result.
+6. Give a friendly, educational final answer with explanations, citing the
+   source (e.g. "per linear_algebra.md") whenever you used a retrieved note.
 Use SymPy for symbolic math, NumPy/SciPy for numerics, Matplotlib for plots.
 Never guess — always execute code to confirm."""
 
@@ -75,14 +79,14 @@ def build_react_agent(
         settings: Used for logging and default LLM construction.
         llm: If provided, used instead of ``ChatAnthropic`` (testing / mocking).
         tools: Tool list for the ReAct loop. Production callers resolve this
-            via ``mcp_client.load_sandbox_tools`` (async, so it can't default
+            via ``mcp_client.load_mcp_tools`` (async, so it can't default
             here); tests pass a stand-in. Required — raises if omitted.
         checkpointer: If provided, the graph persists message history per
             ``thread_id`` across ``ainvoke``/``astream`` calls (conversation
             memory). Omit for a stateless graph (each call is independent).
     """
     if tools is None:
-        msg = "build_react_agent requires tools= (see mcp_client.load_sandbox_tools)"
+        msg = "build_react_agent requires tools= (see mcp_client.load_mcp_tools)"
         raise ValueError(msg)
 
     model = llm or build_llm(settings)

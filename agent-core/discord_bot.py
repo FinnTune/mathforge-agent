@@ -32,7 +32,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import build_react_agent
 from config import load_settings
-from mcp_client import load_sandbox_tools
+from mcp_client import load_mcp_tools
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ async def async_main() -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    tools = await load_sandbox_tools(settings)
+    tools = await load_mcp_tools(settings)
     agent = build_react_agent(settings, tools=tools, checkpointer=InMemorySaver())
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
