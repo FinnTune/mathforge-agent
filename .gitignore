@@ -25,6 +25,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# Rust
+target/
+
 # Output folders
 plots/
 .matplotlib/

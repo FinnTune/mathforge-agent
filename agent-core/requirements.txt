@@ -4,13 +4,14 @@
 #
 # Plain pip users without pyproject workflows can use:
 #   pip install -r requirements.txt
+#
+# The scientific stack (numpy/sympy/matplotlib/scipy) is no longer a dependency
+# here — it's only needed by the Python interpreter the Rust sandbox server
+# invokes (MATHFORGE_SANDBOX_PYTHON); see mcp-servers/sandbox-rs/requirements.txt.
 
 langgraph==1.1.8
 langchain-anthropic==1.4.1
-langchain-core==1.3.0
+langchain-core>=1.6.2,<2
 python-dotenv==1.2.2
 discord.py>=2.4,<3
-numpy>=2.0,<3
-sympy>=1.13,<2
-matplotlib>=3.9,<4
-scipy>=1.14,<2
+langchain-mcp-adapters==0.3.2

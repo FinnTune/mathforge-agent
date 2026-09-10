@@ -25,6 +25,10 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MATHFORGE_CODE_TIMEOUT_SEC", "12")
     monkeypatch.setenv("MATHFORGE_WORKSPACE_ROOT", "/tmp/ws")
     monkeypatch.setenv("MATHFORGE_LOG_LEVEL", "warning")
+    monkeypatch.setenv("MATHFORGE_SANDBOX_MCP_BIN", "/opt/mathforge-sandbox-mcp")
+    monkeypatch.setenv("MATHFORGE_SANDBOX_PYTHON", "/opt/venv/bin/python")
+    monkeypatch.setenv("MATHFORGE_SANDBOX_MAX_MEMORY_MB", "256")
+    monkeypatch.setenv("MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES", "1000")
 
     s = load_settings()
     assert s.anthropic_api_key == "sk-test"
@@ -34,6 +38,18 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.code_timeout_sec == 12.0
     assert s.workspace_root == "/tmp/ws"
     assert s.log_level == "WARNING"
+    assert s.sandbox_mcp_bin == "/opt/mathforge-sandbox-mcp"
+    assert s.sandbox_python == "/opt/venv/bin/python"
+    assert s.sandbox_max_memory_mb == 256
+    assert s.sandbox_max_output_bytes == 1000
+
+
+def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("MATHFORGE_SANDBOX_MCP_BIN", raising=False)
+    s = load_settings()
+    assert s.sandbox_mcp_bin.endswith("mcp-servers/sandbox-rs/target/release/mathforge-sandbox-mcp")
+    assert s.sandbox_python == "python3"
 
 
 def test_settings_dataclass_instantiation() -> None:
@@ -46,6 +62,10 @@ def test_settings_dataclass_instantiation() -> None:
         code_timeout_sec=1.0,
         workspace_root=".",
         log_level="INFO",
+        sandbox_mcp_bin="/path/to/mathforge-sandbox-mcp",
+        sandbox_python="python3",
+        sandbox_max_memory_mb=512,
+        sandbox_max_output_bytes=256_000,
     )
     assert s.max_tokens == 100
 

@@ -1,0 +1,8 @@
+# Python packages the sandboxed interpreter (MATHFORGE_SANDBOX_PYTHON) needs —
+# imported unconditionally by env::SANDBOX_PREAMBLE for every execution.
+# Not installed by `cargo`; install into whatever python MATHFORGE_SANDBOX_PYTHON
+# points at, e.g.: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+numpy>=2.0,<3
+sympy>=1.13,<2
+matplotlib>=3.9,<4
+scipy>=1.14,<2

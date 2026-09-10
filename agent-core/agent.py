@@ -8,6 +8,13 @@ prompt stays fixed while chat history grows.
 ``build_react_agent(..., llm=...)`` accepts an optional model for tests
 (``tests.helpers.ScriptedToolModel``) so CI does not call Anthropic.
 
+``build_react_agent(..., tools=...)`` accepts an explicit tool list (same
+override pattern as ``llm``). Production callers resolve the real tools from
+the Rust sandbox MCP server via ``mcp_client.load_sandbox_tools`` and pass
+them in; tests pass a lightweight in-process stand-in
+(``tests.helpers.make_fake_execute_python_tool``) so the graph/checkpointer
+tests don't need the compiled Rust binary.
+
 ``build_react_agent(..., checkpointer=...)`` wires up LangGraph state
 persistence so a conversation can span multiple turns. Callers must invoke the
 compiled graph with ``config={"configurable": {"thread_id": ...}}`` for memory
@@ -22,12 +29,12 @@ import logging
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import create_react_agent
 
 from config import Settings
-from tools import execute_python_code
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +44,7 @@ Your job is to solve math and coding problems using clear reasoning.
 Always:
 1. Think step-by-step.
 2. Write clean, correct Python code.
-3. Execute it with the execute_python_code tool.
+3. Execute it with the execute_python tool.
 4. Verify the result.
 5. Give a friendly, educational final answer with explanations.
 Use SymPy for symbolic math, NumPy/SciPy for numerics, Matplotlib for plots.
@@ -59,6 +66,7 @@ def build_llm(settings: Settings) -> BaseChatModel:
 def build_react_agent(
     settings: Settings,
     llm: BaseChatModel | None = None,
+    tools: list[BaseTool] | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     """Compile and return the LangGraph agent graph.
@@ -66,10 +74,17 @@ def build_react_agent(
     Args:
         settings: Used for logging and default LLM construction.
         llm: If provided, used instead of ``ChatAnthropic`` (testing / mocking).
+        tools: Tool list for the ReAct loop. Production callers resolve this
+            via ``mcp_client.load_sandbox_tools`` (async, so it can't default
+            here); tests pass a stand-in. Required — raises if omitted.
         checkpointer: If provided, the graph persists message history per
             ``thread_id`` across ``ainvoke``/``astream`` calls (conversation
             memory). Omit for a stateless graph (each call is independent).
     """
+    if tools is None:
+        msg = "build_react_agent requires tools= (see mcp_client.load_sandbox_tools)"
+        raise ValueError(msg)
+
     model = llm or build_llm(settings)
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -80,14 +95,15 @@ def build_react_agent(
     )
     graph = create_react_agent(
         model=model,
-        tools=[execute_python_code],
+        tools=tools,
         prompt=prompt,
         checkpointer=checkpointer,
         debug=False,
     )
     logger.info(
-        "MathForge agent built (model=%s, memory=%s)",
+        "MathForge agent built (model=%s, tools=%s, memory=%s)",
         settings.model,
+        [t.name for t in tools],
         checkpointer is not None,
     )
     return graph

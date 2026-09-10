@@ -32,7 +32,7 @@ class _FakeToolStreamAgent:
         yield (
             ToolMessage(
                 content="print(1)",
-                name="execute_python_code",
+                name="execute_python",
                 tool_call_id="c1",
             ),
             {},
@@ -90,7 +90,7 @@ async def test_run_turn_verbose_tool(capsys: pytest.CaptureFixture[str]) -> None
         verbose=True,
     )
     out = capsys.readouterr().out
-    assert "[tool:execute_python_code]" in out
+    assert "[tool:execute_python]" in out
     assert "print(1)" in out
 
 
@@ -134,9 +134,20 @@ async def test_async_main_reset_command_starts_new_thread(monkeypatch) -> None:
             code_timeout_sec=5.0,
             workspace_root=".",
             log_level="DEBUG",
+            sandbox_mcp_bin="/nonexistent/mathforge-sandbox-mcp",
+            sandbox_python="python3",
+            sandbox_max_memory_mb=512,
+            sandbox_max_output_bytes=256_000,
         ),
     )
-    monkeypatch.setattr(main_module, "build_react_agent", lambda settings, checkpointer=None: agent)
+
+    async def fake_load_sandbox_tools(settings):
+        return []
+
+    monkeypatch.setattr(main_module, "load_sandbox_tools", fake_load_sandbox_tools)
+    monkeypatch.setattr(
+        main_module, "build_react_agent", lambda settings, tools=None, checkpointer=None: agent
+    )
 
     inputs = iter(["hi", "reset", "hi again", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))

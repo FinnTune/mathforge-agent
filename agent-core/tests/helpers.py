@@ -13,6 +13,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import BaseTool, tool
 
 
 class ScriptedToolModel(BaseChatModel):
@@ -42,3 +43,20 @@ class ScriptedToolModel(BaseChatModel):
     def bind_tools(self, tools, **kwargs: Any) -> BaseChatModel:
         """No-op bind: tool schemas are ignored; responses are fully scripted."""
         return self
+
+
+def make_fake_execute_python_tool() -> BaseTool:
+    """A stand-in for the real MCP sandbox tool, named to match it exactly.
+
+    Lets ``ScriptedToolModel``-driven graph tests (tool-call routing,
+    checkpointer persistence) run without building/spawning the Rust sandbox
+    server — that server has its own test suite in
+    ``mcp-servers/sandbox-rs/tests``.
+    """
+
+    @tool
+    def execute_python(code: str) -> str:
+        """Fake sandbox tool for tests: echoes the code it was asked to run."""
+        return f"Execution result:\n(fake sandbox — received code: {code!r})"
+
+    return execute_python
