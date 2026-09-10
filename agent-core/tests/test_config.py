@@ -29,6 +29,12 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MATHFORGE_SANDBOX_PYTHON", "/opt/venv/bin/python")
     monkeypatch.setenv("MATHFORGE_SANDBOX_MAX_MEMORY_MB", "256")
     monkeypatch.setenv("MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES", "1000")
+    monkeypatch.setenv("MATHFORGE_MATHKB_MCP_PYTHON", "/opt/mathkb-venv/bin/python")
+    monkeypatch.setenv("MATHFORGE_MATHKB_MCP_SCRIPT", "/opt/mathkb/server.py")
+    monkeypatch.setenv("QDRANT_URL", "http://qdrant.internal:6333")
+    monkeypatch.setenv("QDRANT_COLLECTION", "custom-notes")
+    monkeypatch.setenv("VOYAGE_API_KEY", "voy-test")
+    monkeypatch.setenv("VOYAGE_MODEL", "voyage-3")
 
     s = load_settings()
     assert s.anthropic_api_key == "sk-test"
@@ -42,14 +48,26 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.sandbox_python == "/opt/venv/bin/python"
     assert s.sandbox_max_memory_mb == 256
     assert s.sandbox_max_output_bytes == 1000
+    assert s.mathkb_mcp_python == "/opt/mathkb-venv/bin/python"
+    assert s.mathkb_mcp_script == "/opt/mathkb/server.py"
+    assert s.qdrant_url == "http://qdrant.internal:6333"
+    assert s.qdrant_collection == "custom-notes"
+    assert s.voyage_api_key == "voy-test"
+    assert s.voyage_model == "voyage-3"
 
 
 def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.delenv("MATHFORGE_SANDBOX_MCP_BIN", raising=False)
+    monkeypatch.delenv("MATHFORGE_MATHKB_MCP_PYTHON", raising=False)
     s = load_settings()
     assert s.sandbox_mcp_bin.endswith("mcp-servers/sandbox-rs/target/release/mathforge-sandbox-mcp")
     assert s.sandbox_python == "python3"
+    assert s.mathkb_mcp_python.endswith("mcp-servers/mathkb-py/.venv/bin/python")
+    assert s.mathkb_mcp_script.endswith("mcp-servers/mathkb-py/server.py")
+    assert s.qdrant_url == "http://localhost:6333"
+    assert s.qdrant_collection == "mathforge-math-notes"
+    assert s.voyage_model == "voyage-3-lite"
 
 
 def test_settings_dataclass_instantiation() -> None:
@@ -66,6 +84,12 @@ def test_settings_dataclass_instantiation() -> None:
         sandbox_python="python3",
         sandbox_max_memory_mb=512,
         sandbox_max_output_bytes=256_000,
+        mathkb_mcp_python="/path/to/mathkb-venv/bin/python",
+        mathkb_mcp_script="/path/to/server.py",
+        qdrant_url="http://localhost:6333",
+        qdrant_collection="mathforge-math-notes",
+        voyage_api_key="",
+        voyage_model="voyage-3-lite",
     )
     assert s.max_tokens == 100
 

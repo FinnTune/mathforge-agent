@@ -60,3 +60,19 @@ def make_fake_execute_python_tool() -> BaseTool:
         return f"Execution result:\n(fake sandbox — received code: {code!r})"
 
     return execute_python
+
+
+def make_fake_search_math_knowledge_tool() -> BaseTool:
+    """A stand-in for the real MCP mathkb tool, named to match it exactly.
+
+    Lets graph tests exercise a ``search_math_knowledge`` tool-call without
+    Qdrant/Voyage or the mathkb server running — that server has its own test
+    suite in ``mcp-servers/mathkb-py/tests``.
+    """
+
+    @tool
+    def search_math_knowledge(query: str, top_k: int = 3) -> str:
+        """Fake mathkb tool for tests: returns a canned note for any query."""
+        return f"[source: fake_notes.md | section: Fake] (fake retrieval — query was {query!r})"
+
+    return search_math_knowledge

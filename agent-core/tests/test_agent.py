@@ -14,7 +14,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import build_react_agent
-from tests.helpers import ScriptedToolModel, make_fake_execute_python_tool
+from tests.helpers import (
+    ScriptedToolModel,
+    make_fake_execute_python_tool,
+    make_fake_search_math_knowledge_tool,
+)
 
 
 @pytest.mark.asyncio
@@ -72,6 +76,37 @@ async def test_stream_messages_yields_tool_and_ai(dummy_settings) -> None:
         chunks.append(item)
 
     assert chunks, "expected stream events"
+
+
+@pytest.mark.asyncio
+async def test_react_loop_routes_to_search_math_knowledge(dummy_settings) -> None:
+    model = ScriptedToolModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_math_knowledge",
+                        "args": {"query": "eigenvalue of a matrix"},
+                        "id": "call_kb",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Per linear_algebra.md, use numpy.linalg.eig."),
+        ]
+    )
+    agent = build_react_agent(
+        dummy_settings,
+        llm=model,
+        tools=[make_fake_execute_python_tool(), make_fake_search_math_knowledge_tool()],
+    )
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage("How do I find eigenvalues?")]},
+        config={"recursion_limit": dummy_settings.recursion_limit},
+    )
+    texts = [m.content for m in result["messages"] if isinstance(m, AIMessage) and m.content]
+    assert any("linear_algebra.md" in str(t) for t in texts)
 
 
 def test_build_llm_uses_max_tokens(dummy_settings) -> None:

@@ -4,8 +4,9 @@ Flow:
 1. ``load_dotenv()`` loads ``.env`` into the environment (does not override
    variables already set in the shell unless you change that in python-dotenv).
 2. ``load_settings()`` validates ``ANTHROPIC_API_KEY`` and reads MathForge options.
-3. ``mcp_client.load_sandbox_tools()`` spawns the Rust sandbox MCP server
-   (``mcp-servers/sandbox-rs``) and returns its tool(s) as LangChain tools.
+3. ``mcp_client.load_mcp_tools()`` spawns the sandbox (Rust,
+   ``mcp-servers/sandbox-rs``) and mathkb (Python, ``mcp-servers/mathkb-py``)
+   MCP servers and returns their tools as LangChain tools.
 4. The agent is built with an in-memory checkpointer keyed by a per-session
    ``thread_id``, so the REPL remembers earlier turns ("plot that", "now solve
    it symbolically"). Typing ``reset`` starts a fresh thread. Memory lives only
@@ -35,7 +36,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import build_react_agent
 from config import load_settings
-from mcp_client import load_sandbox_tools
+from mcp_client import load_mcp_tools
 
 
 def _configure_logging(level: str) -> None:
@@ -141,7 +142,7 @@ async def async_main(argv: list[str] | None = None) -> int:
 
     _configure_logging(settings.log_level)
     try:
-        tools = await load_sandbox_tools(settings)
+        tools = await load_mcp_tools(settings)
         agent = build_react_agent(settings, tools=tools, checkpointer=InMemorySaver())
     except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
         logging.exception("Failed to build agent")

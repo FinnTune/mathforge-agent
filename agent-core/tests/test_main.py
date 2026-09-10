@@ -138,13 +138,19 @@ async def test_async_main_reset_command_starts_new_thread(monkeypatch) -> None:
             sandbox_python="python3",
             sandbox_max_memory_mb=512,
             sandbox_max_output_bytes=256_000,
+            mathkb_mcp_python="/nonexistent/mathkb-python",
+            mathkb_mcp_script="/nonexistent/server.py",
+            qdrant_url="http://localhost:6333",
+            qdrant_collection="test-notes",
+            voyage_api_key="",
+            voyage_model="voyage-3-lite",
         ),
     )
 
-    async def fake_load_sandbox_tools(settings):
+    async def fake_load_mcp_tools(settings):
         return []
 
-    monkeypatch.setattr(main_module, "load_sandbox_tools", fake_load_sandbox_tools)
+    monkeypatch.setattr(main_module, "load_mcp_tools", fake_load_mcp_tools)
     monkeypatch.setattr(
         main_module, "build_react_agent", lambda settings, tools=None, checkpointer=None: agent
     )
