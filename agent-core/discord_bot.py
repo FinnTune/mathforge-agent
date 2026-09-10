@@ -32,6 +32,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import build_react_agent
 from config import load_settings
+from mcp_client import load_sandbox_tools
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,6 @@ async def async_main() -> int:
     load_dotenv()
     settings = load_settings()
 
-    os.environ["MATHFORGE_WORKSPACE_ROOT"] = settings.workspace_root
-    os.environ["MATHFORGE_CODE_TIMEOUT_SEC"] = str(settings.code_timeout_sec)
-
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     if not token:
         raise ValueError("DISCORD_BOT_TOKEN is required for Discord mode.")
@@ -121,7 +119,8 @@ async def async_main() -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    agent = build_react_agent(settings, checkpointer=InMemorySaver())
+    tools = await load_sandbox_tools(settings)
+    agent = build_react_agent(settings, tools=tools, checkpointer=InMemorySaver())
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)

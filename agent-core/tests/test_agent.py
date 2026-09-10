@@ -14,7 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import build_react_agent
-from tests.helpers import ScriptedToolModel
+from tests.helpers import ScriptedToolModel, make_fake_execute_python_tool
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,7 @@ async def test_react_loop_tool_then_answer(dummy_settings) -> None:
                 content="",
                 tool_calls=[
                     {
-                        "name": "execute_python_code",
+                        "name": "execute_python",
                         "args": {"code": "print(2 ** 10)"},
                         "id": "call_1",
                         "type": "tool_call",
@@ -35,7 +35,7 @@ async def test_react_loop_tool_then_answer(dummy_settings) -> None:
             AIMessage(content="1024 is the answer."),
         ]
     )
-    agent = build_react_agent(dummy_settings, llm=model)
+    agent = build_react_agent(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
     result = await agent.ainvoke(
         {"messages": [HumanMessage("Compute 2**10")]},
         config={"recursion_limit": dummy_settings.recursion_limit},
@@ -52,7 +52,7 @@ async def test_stream_messages_yields_tool_and_ai(dummy_settings) -> None:
                 content="",
                 tool_calls=[
                     {
-                        "name": "execute_python_code",
+                        "name": "execute_python",
                         "args": {"code": "print('hi')"},
                         "id": "c2",
                         "type": "tool_call",
@@ -62,7 +62,7 @@ async def test_stream_messages_yields_tool_and_ai(dummy_settings) -> None:
             AIMessage(content="Done."),
         ]
     )
-    agent = build_react_agent(dummy_settings, llm=model)
+    agent = build_react_agent(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
     chunks: list = []
     async for item in agent.astream(
         {"messages": [HumanMessage("Hi")]},
@@ -96,7 +96,12 @@ async def test_checkpointer_persists_history_across_turns(dummy_settings) -> Non
             AIMessage(content="Second answer, building on the first."),
         ]
     )
-    agent = build_react_agent(dummy_settings, llm=model, checkpointer=InMemorySaver())
+    agent = build_react_agent(
+        dummy_settings,
+        llm=model,
+        tools=[make_fake_execute_python_tool()],
+        checkpointer=InMemorySaver(),
+    )
     config = {
         "configurable": {"thread_id": "t1"},
         "recursion_limit": dummy_settings.recursion_limit,
@@ -116,7 +121,12 @@ async def test_checkpointer_isolates_different_threads(dummy_settings) -> None:
     from langgraph.checkpoint.memory import InMemorySaver
 
     model = ScriptedToolModel([AIMessage(content="Answer.")])
-    agent = build_react_agent(dummy_settings, llm=model, checkpointer=InMemorySaver())
+    agent = build_react_agent(
+        dummy_settings,
+        llm=model,
+        tools=[make_fake_execute_python_tool()],
+        checkpointer=InMemorySaver(),
+    )
     recursion_limit = dummy_settings.recursion_limit
 
     await agent.ainvoke(
@@ -136,7 +146,7 @@ async def test_checkpointer_isolates_different_threads(dummy_settings) -> None:
 async def test_without_checkpointer_each_call_is_stateless(dummy_settings) -> None:
     """No checkpointer passed (default None): behavior matches pre-memory graphs."""
     model = ScriptedToolModel([AIMessage(content="Answer.")])
-    agent = build_react_agent(dummy_settings, llm=model)
+    agent = build_react_agent(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
 
     result = await agent.ainvoke(
         {"messages": [HumanMessage("Q1")]},

@@ -4,9 +4,8 @@ Flow:
 1. ``load_dotenv()`` loads ``.env`` into the environment (does not override
    variables already set in the shell unless you change that in python-dotenv).
 2. ``load_settings()`` validates ``ANTHROPIC_API_KEY`` and reads MathForge options.
-3. Workspace and timeout from ``Settings`` are written to ``MATHFORGE_*`` so
-   ``tools.execute_python_code`` sees the same values without importing ``config``
-   at tool definition time.
+3. ``mcp_client.load_sandbox_tools()`` spawns the Rust sandbox MCP server
+   (``mcp-servers/sandbox-rs``) and returns its tool(s) as LangChain tools.
 4. The agent is built with an in-memory checkpointer keyed by a per-session
    ``thread_id``, so the REPL remembers earlier turns ("plot that", "now solve
    it symbolically"). Typing ``reset`` starts a fresh thread. Memory lives only
@@ -21,7 +20,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import sys
 import uuid
 
@@ -37,6 +35,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import build_react_agent
 from config import load_settings
+from mcp_client import load_sandbox_tools
 
 
 def _configure_logging(level: str) -> None:
@@ -140,13 +139,10 @@ async def async_main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    # Keep tools and Settings aligned (tools read env at invocation time).
-    os.environ["MATHFORGE_WORKSPACE_ROOT"] = settings.workspace_root
-    os.environ["MATHFORGE_CODE_TIMEOUT_SEC"] = str(settings.code_timeout_sec)
-
     _configure_logging(settings.log_level)
     try:
-        agent = build_react_agent(settings, checkpointer=InMemorySaver())
+        tools = await load_sandbox_tools(settings)
+        agent = build_react_agent(settings, tools=tools, checkpointer=InMemorySaver())
     except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
         logging.exception("Failed to build agent")
         print(f"Could not start agent: {exc}", file=sys.stderr)

@@ -1,11 +1,25 @@
 # MathForge — LangGraph + Claude math and code agent
 
-A ReAct-style agent built with **LangGraph** and **Claude (Anthropic)**. It solves math and coding tasks by generating Python, running it in a **separate process** with a **minimal environment** (API keys are not passed to the child), and explaining the results.
+A ReAct-style agent built with **LangGraph** and **Claude (Anthropic)**. It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, and explaining the results.
+
+## Architecture
+
+MathForge is a polyglot monorepo, one directory per component:
+
+```
+agent-core/          Python — LangGraph ReAct agent, CLI, Discord bot
+mcp-servers/
+  sandbox-rs/         Rust — MCP server that executes model-generated Python
+                       in a resource-limited subprocess (the trust boundary)
+```
+
+`agent-core` talks to `sandbox-rs` as an **MCP client** (`langchain-mcp-adapters`), over stdio — the same transport pattern Claude Desktop uses to run local MCP servers. This is in-progress toward a larger rearchitecture (RAG tool server, a hand-rolled multi-node LangGraph, a gRPC service layer); see commit history for what's landed.
 
 ## Security model
 
 - **Not a cryptographic sandbox.** Untrusted code still runs as your user on your machine, with filesystem access under the chosen workspace and whatever the Python standard library allows.
-- **Compared to an in-process REPL:** execution uses `subprocess` + a fresh interpreter, strict timeouts, stripped environment (no `ANTHROPIC_API_KEY` in the child), and capped captured output.
+- **Process isolation + resource limits (`mcp-servers/sandbox-rs`):** a fresh interpreter per run, a stripped environment (no `ANTHROPIC_API_KEY` in the child), and — applied via `setrlimit` in the child before `exec`, not just a wall-clock timeout — a CPU-time cap, a memory (`RLIMIT_AS`) cap, and an open-file cap. On timeout the whole process group is killed, not just the direct child, so a script's own subprocesses can't outlive it. Captured output is read with a running cap rather than buffered to EOF then truncated, bounding the parent's memory regardless of how much the child tries to write.
+- **Deliberately not relying on `RLIMIT_NPROC`** as a fork-bomb guard — on Linux it caps the real UID's total process count system-wide, not the child's subtree, so it's the wrong tool here. A correct per-subtree guard needs a cgroup with `pids.max`; that's known future work, not implemented yet.
 - **Stronger isolation** (containers, gVisor, remote sandboxes) is recommended if you accept **arbitrary** prompts or untrusted users.
 
 ## Quick start
@@ -13,20 +27,29 @@ A ReAct-style agent built with **LangGraph** and **Claude (Anthropic)**. It solv
 ```bash
 git clone https://github.com/yourusername/mathforge-agent.git
 cd mathforge-agent
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+
+# 1. Build the sandbox MCP server (Rust)
+cargo build --release --manifest-path mcp-servers/sandbox-rs/Cargo.toml
+# It needs its own Python with the scientific stack (separate from agent-core's venv):
+python3 -m venv mcp-servers/sandbox-rs/.venv
+mcp-servers/sandbox-rs/.venv/bin/pip install -r mcp-servers/sandbox-rs/requirements.txt
+
+# 2. Set up agent-core (Python)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e "./agent-core[dev]"
 cp .env.example .env
-# Set ANTHROPIC_API_KEY in .env
-python main.py
+# Set ANTHROPIC_API_KEY in .env, and point MATHFORGE_SANDBOX_PYTHON at the venv from step 1:
+#   MATHFORGE_SANDBOX_PYTHON=mcp-servers/sandbox-rs/.venv/bin/python
+python agent-core/main.py
 ```
 
 CLI options:
 
-- `python main.py` — stream the assistant reply to the terminal.
-- `python main.py --no-stream` — wait for the full reply (easier for scripting).
-- `python main.py --verbose` — print tool outputs (including executed code results).
+- `python agent-core/main.py` — stream the assistant reply to the terminal.
+- `python agent-core/main.py --no-stream` — wait for the full reply (easier for scripting).
+- `python agent-core/main.py --verbose` — print tool outputs (including executed code results).
 
-You can also run `mathforge` if the venv’s `bin` is on your `PATH` (console script from `pyproject.toml`).
+You can also run `mathforge` if the venv's `bin` is on your `PATH` (console script from `agent-core/pyproject.toml`).
 
 ### Conversation memory
 
@@ -58,7 +81,7 @@ After the prompt `You:`, try pasting one of these (the agent will run Python in 
 
 - `Write a function that returns the first 15 Fibonacci numbers as a list, run it, and print the result.`
 
-Use `python main.py --verbose` if you want to see tool output (stdout from executed code) in the terminal as well.
+Use `python agent-core/main.py --verbose` if you want to see tool output (stdout from executed code) in the terminal as well.
 
 ## Configuration
 
@@ -72,7 +95,11 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_MAX_TOKENS` | Optional cap on completion tokens. |
 | `MATHFORGE_RECURSION_LIMIT` | LangGraph step / recursion budget for the agent. |
 | `MATHFORGE_WORKSPACE_ROOT` | Working directory for code execution and `plots/`. |
-| `MATHFORGE_CODE_TIMEOUT_SEC` | Per-execution timeout in the subprocess. |
+| `MATHFORGE_CODE_TIMEOUT_SEC` | Per-execution timeout (also the sandbox's CPU-time rlimit). |
+| `MATHFORGE_SANDBOX_MCP_BIN` | Path to the compiled `mathforge-sandbox-mcp` binary. |
+| `MATHFORGE_SANDBOX_PYTHON` | Python interpreter the sandbox invokes (needs numpy/sympy/matplotlib/scipy). |
+| `MATHFORGE_SANDBOX_MAX_MEMORY_MB` | Sandbox `RLIMIT_AS` cap in MB. |
+| `MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES` | Cap on captured sandbox stdout+stderr. |
 | `MATHFORGE_LOG_LEVEL` | `logging` level for the app. |
 | `DISCORD_BOT_TOKEN` | Required only for `mathforge-discord`. |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | Optional comma-separated channel allowlist. |
@@ -98,7 +125,7 @@ mathforge-discord
 or:
 
 ```bash
-python discord_bot.py
+python agent-core/discord_bot.py
 ```
 
 Then call it in Discord:
@@ -119,15 +146,23 @@ Recommended safety settings in `.env`:
 ## Development
 
 ```bash
+# agent-core (Python)
+cd agent-core
 ruff check .
-pytest -q
+ANTHROPIC_API_KEY=dummy-for-ci pytest -q
+
+# mcp-servers/sandbox-rs (Rust) — needs MATHFORGE_SANDBOX_PYTHON set to a
+# python3 with numpy/sympy/matplotlib/scipy (see its requirements.txt)
+cd mcp-servers/sandbox-rs
+cargo clippy --all-targets -- -D warnings
+MATHFORGE_SANDBOX_PYTHON=/path/to/venv/bin/python cargo test
 ```
 
-CI runs Ruff and pytest on Python 3.11–3.13.
+CI runs both: Ruff + pytest on Python 3.11–3.13 for `agent-core`, and `cargo clippy`/`cargo test` for `sandbox-rs`.
 
 ## Requirements
 
-Python **3.11+**. Dependencies are declared in `pyproject.toml` (scientific stack: NumPy, SciPy, SymPy, Matplotlib for the sandbox preamble).
+Python **3.11+** for `agent-core`, Rust (stable) for `mcp-servers/sandbox-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` and `requirements.txt`).
 
 ## License
 

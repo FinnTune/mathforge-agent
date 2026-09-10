@@ -8,8 +8,11 @@ on:
     branches: [main, master]
 
 jobs:
-  test:
+  agent-core:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-core
     strategy:
       matrix:
         # Match pyproject requires-python; catch version-specific failures early.
@@ -30,3 +33,31 @@ jobs:
           # load_settings() requires a non-empty key; tests mock the LLM, not the API.
           ANTHROPIC_API_KEY: dummy-for-ci
         run: pytest -q
+
+  sandbox-rs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-servers/sandbox-rs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mcp-servers/sandbox-rs
+      # The sandbox preamble unconditionally imports numpy/sympy/matplotlib/
+      # scipy, so every test — even `print("hello")` — needs a Python with
+      # them installed; MATHFORGE_SANDBOX_PYTHON points the tests at it.
+      - name: Set up sandboxed Python env
+        run: |
+          python3 -m venv .venv-sandbox-test
+          .venv-sandbox-test/bin/pip install -r requirements.txt
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        env:
+          MATHFORGE_SANDBOX_PYTHON: ${{ github.workspace }}/mcp-servers/sandbox-rs/.venv-sandbox-test/bin/python
+        run: cargo test

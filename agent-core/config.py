@@ -12,6 +12,19 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def _default_sandbox_mcp_bin() -> str:
+    """Path to the compiled Rust sandbox MCP server, relative to this repo checkout."""
+    return str(
+        Path(__file__).resolve().parent.parent
+        / "mcp-servers"
+        / "sandbox-rs"
+        / "target"
+        / "release"
+        / "mathforge-sandbox-mcp"
+    )
 
 
 def _env_int(key: str, default: int) -> int:
@@ -45,6 +58,13 @@ class Settings:
     # Working directory for executed code and relative paths like ./plots/.
     workspace_root: str
     log_level: str
+    # Rust MCP sandbox server (mcp-servers/sandbox-rs), spawned over stdio.
+    sandbox_mcp_bin: str
+    # Python interpreter *inside the sandbox process* that has numpy/sympy/
+    # matplotlib/scipy installed (see mcp-servers/sandbox-rs/requirements.txt).
+    sandbox_python: str
+    sandbox_max_memory_mb: int
+    sandbox_max_output_bytes: int
 
 
 def load_settings() -> Settings:
@@ -70,4 +90,8 @@ def load_settings() -> Settings:
         code_timeout_sec=_env_float("MATHFORGE_CODE_TIMEOUT_SEC", 30.0),
         workspace_root=os.getenv("MATHFORGE_WORKSPACE_ROOT", "."),
         log_level=os.getenv("MATHFORGE_LOG_LEVEL", "INFO").upper(),
+        sandbox_mcp_bin=os.getenv("MATHFORGE_SANDBOX_MCP_BIN", _default_sandbox_mcp_bin()),
+        sandbox_python=os.getenv("MATHFORGE_SANDBOX_PYTHON", "python3"),
+        sandbox_max_memory_mb=_env_int("MATHFORGE_SANDBOX_MAX_MEMORY_MB", 512),
+        sandbox_max_output_bytes=_env_int("MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES", 256_000),
     )
