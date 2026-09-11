@@ -6,13 +6,14 @@ just another transport (CLI remains unchanged). The bot:
 - registers `/mathforge query:<text> reset:<bool>`
 - enforces optional channel allowlist and prompt length limits
 - runs the same compiled agent used by CLI, with per-channel-per-user
-  conversation memory (an in-memory LangGraph checkpointer keyed by
+  conversation memory (a SQLite-backed LangGraph checkpointer keyed by
   ``"<channel_id>:<user_id>:<generation>"``; ``reset:true`` bumps the
   generation to start a fresh thread)
 - chunks long replies to satisfy Discord message limits
 
-Memory lives only in the bot process's RAM: it does not survive a restart and
-is not shared across processes.
+Memory is SQLite-backed (``checkpointer.build_checkpointer``), so it survives
+a bot restart; it's still local to this process's DB file, not shared across
+multiple bot instances.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
 
-from agent import build_react_agent
+from agent import build_agent_graph
+from checkpointer import build_checkpointer
 from config import load_settings
 from mcp_client import load_mcp_tools
 
@@ -120,105 +121,111 @@ async def async_main() -> int:
     )
 
     tools = await load_mcp_tools(settings)
-    agent = build_react_agent(settings, tools=tools, checkpointer=InMemorySaver())
-    intents = discord.Intents.default()
-    client = discord.Client(intents=intents)
-    tree = app_commands.CommandTree(client)
-    last_seen_by_user: dict[int, float] = {}
-    # Bumped per (channel, user) on reset; included in the thread_id so the old
-    # checkpointer thread is simply abandoned rather than deleted.
-    generation_by_thread: dict[tuple[int | None, int], int] = defaultdict(int)
-    synced = False
 
-    @tree.command(name="mathforge", description="Ask MathForge a math or coding question")
-    @app_commands.describe(
-        query="Your math/coding question (optional if reset is true)",
-        reset="Clear your conversation memory in this channel before asking",
-    )
-    async def mathforge(
-        interaction: discord.Interaction,
-        query: str | None = None,
-        reset: bool = False,
-    ) -> None:
-        channel_id = interaction.channel_id
-        if not is_channel_allowed(channel_id, allowed_channels):
-            await interaction.response.send_message(
-                "This channel is not allowed for MathForge.",
-                ephemeral=True,
-            )
-            return
+    # The checkpointer's DB connection must stay open for the whole bot
+    # process lifetime (unlike the MCP tool sessions above, which are one-shot).
+    async with build_checkpointer(settings) as checkpointer:
+        agent = build_agent_graph(settings, tools=tools, checkpointer=checkpointer)
+        intents = discord.Intents.default()
+        client = discord.Client(intents=intents)
+        tree = app_commands.CommandTree(client)
+        last_seen_by_user: dict[int, float] = {}
+        # Bumped per (channel, user) on reset; included in the thread_id so the old
+        # checkpointer thread is simply abandoned rather than deleted.
+        generation_by_thread: dict[tuple[int | None, int], int] = defaultdict(int)
+        synced = False
 
-        if interaction.user is None:
-            await interaction.response.send_message("Could not identify user.", ephemeral=True)
-            return
-        user_id = interaction.user.id
-        thread_key_id = (channel_id, user_id)
-
-        if reset:
-            generation_by_thread[thread_key_id] += 1
-            if query is None:
+        @tree.command(name="mathforge", description="Ask MathForge a math or coding question")
+        @app_commands.describe(
+            query="Your math/coding question (optional if reset is true)",
+            reset="Clear your conversation memory in this channel before asking",
+        )
+        async def mathforge(
+            interaction: discord.Interaction,
+            query: str | None = None,
+            reset: bool = False,
+        ) -> None:
+            channel_id = interaction.channel_id
+            if not is_channel_allowed(channel_id, allowed_channels):
                 await interaction.response.send_message(
-                    "Conversation memory cleared.", ephemeral=True
-                )
-                return
-
-        if query is None:
-            await interaction.response.send_message(
-                "Please provide a query (or set reset:true to clear memory).",
-                ephemeral=True,
-            )
-            return
-
-        if len(query) > max_prompt_chars:
-            await interaction.response.send_message(
-                f"Query too long ({len(query)} chars). Limit is {max_prompt_chars}.",
-                ephemeral=True,
-            )
-            return
-
-        if cooldown_sec > 0:
-            now = time.time()
-            last_seen = last_seen_by_user.get(user_id, 0)
-            wait = cooldown_sec - (now - last_seen)
-            if wait > 0:
-                await interaction.response.send_message(
-                    f"Cooldown active. Please wait {wait:.1f}s and try again.",
+                    "This channel is not allowed for MathForge.",
                     ephemeral=True,
                 )
                 return
-            last_seen_by_user[user_id] = now
 
-        thread_id = thread_key(channel_id, user_id, generation_by_thread[thread_key_id])
-        await interaction.response.defer(thinking=True)
-        try:
-            answer = await run_query(agent, query, settings.recursion_limit, thread_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Discord query failed")
-            await interaction.followup.send(f"Error: {exc}")
-            return
+            if interaction.user is None:
+                await interaction.response.send_message(
+                    "Could not identify user.", ephemeral=True
+                )
+                return
+            user_id = interaction.user.id
+            thread_key_id = (channel_id, user_id)
 
-        for part in chunk_text(answer):
-            await interaction.followup.send(part)
+            if reset:
+                generation_by_thread[thread_key_id] += 1
+                if query is None:
+                    await interaction.response.send_message(
+                        "Conversation memory cleared.", ephemeral=True
+                    )
+                    return
 
-    @client.event
-    async def on_ready() -> None:
-        nonlocal synced
-        if synced:
-            return
-        if dev_guild_id is not None:
-            guild = discord.Object(id=dev_guild_id)
-            # In dev mode we define commands globally, then copy to a guild for fast propagation.
-            tree.copy_global_to(guild=guild)
-            synced_cmds = await tree.sync(guild=guild)
-            logger.info("Synced %d command(s) to guild %s", len(synced_cmds), dev_guild_id)
-        else:
-            synced_cmds = await tree.sync()
-            logger.info("Synced %d global command(s)", len(synced_cmds))
-        synced = True
-        logger.info("Discord bot ready as %s", client.user)
+            if query is None:
+                await interaction.response.send_message(
+                    "Please provide a query (or set reset:true to clear memory).",
+                    ephemeral=True,
+                )
+                return
 
-    await client.start(token)
-    return 0
+            if len(query) > max_prompt_chars:
+                await interaction.response.send_message(
+                    f"Query too long ({len(query)} chars). Limit is {max_prompt_chars}.",
+                    ephemeral=True,
+                )
+                return
+
+            if cooldown_sec > 0:
+                now = time.time()
+                last_seen = last_seen_by_user.get(user_id, 0)
+                wait = cooldown_sec - (now - last_seen)
+                if wait > 0:
+                    await interaction.response.send_message(
+                        f"Cooldown active. Please wait {wait:.1f}s and try again.",
+                        ephemeral=True,
+                    )
+                    return
+                last_seen_by_user[user_id] = now
+
+            thread_id = thread_key(channel_id, user_id, generation_by_thread[thread_key_id])
+            await interaction.response.defer(thinking=True)
+            try:
+                answer = await run_query(agent, query, settings.recursion_limit, thread_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Discord query failed")
+                await interaction.followup.send(f"Error: {exc}")
+                return
+
+            for part in chunk_text(answer):
+                await interaction.followup.send(part)
+
+        @client.event
+        async def on_ready() -> None:
+            nonlocal synced
+            if synced:
+                return
+            if dev_guild_id is not None:
+                guild = discord.Object(id=dev_guild_id)
+                # In dev mode we define commands globally, then copy to a guild for fast sync.
+                tree.copy_global_to(guild=guild)
+                synced_cmds = await tree.sync(guild=guild)
+                logger.info("Synced %d command(s) to guild %s", len(synced_cmds), dev_guild_id)
+            else:
+                synced_cmds = await tree.sync()
+                logger.info("Synced %d global command(s)", len(synced_cmds))
+            synced = True
+            logger.info("Discord bot ready as %s", client.user)
+
+        await client.start(token)
+        return 0
 
 
 def main() -> None:

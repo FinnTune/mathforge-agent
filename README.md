@@ -1,13 +1,13 @@
 # MathForge — LangGraph + Claude math and code agent
 
-A ReAct-style agent built with **LangGraph** and **Claude (Anthropic)**. It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, and explaining the results.
+An agent built with **LangGraph** and **Claude (Anthropic)** using a hand-rolled planner → tools → verifier → responder graph (not just a prebuilt ReAct loop — see [Agent design](#agent-design)). It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, self-checking its own work before answering, and remembering conversations across restarts.
 
 ## Architecture
 
 MathForge is a polyglot monorepo, one directory per component:
 
 ```
-agent-core/          Python — LangGraph ReAct agent, CLI, Discord bot
+agent-core/          Python — LangGraph agent (see "Agent design"), CLI, Discord bot
 mcp-servers/
   sandbox-rs/         Rust MCP server — executes model-generated Python in a
                        resource-limited subprocess (the trust boundary)
@@ -16,7 +16,7 @@ mcp-servers/
 docker-compose.yml    Qdrant (vector store behind mathkb-py)
 ```
 
-`agent-core` talks to both `sandbox-rs` and `mathkb-py` as an **MCP client** (`langchain-mcp-adapters`), over stdio — the same transport pattern Claude Desktop uses to run local MCP servers. This is in-progress toward a larger rearchitecture (a hand-rolled multi-node LangGraph, a gRPC service layer); see commit history for what's landed.
+`agent-core` talks to both `sandbox-rs` and `mathkb-py` as an **MCP client** (`langchain-mcp-adapters`), over stdio — the same transport pattern Claude Desktop uses to run local MCP servers. This is in-progress toward a larger rearchitecture (a gRPC service layer is next); see commit history for what's landed.
 
 ## Security model
 
@@ -72,9 +72,9 @@ You can also run `mathforge` if the venv's `bin` is on your `PATH` (console scri
 
 ### Conversation memory
 
-The CLI and Discord bot remember earlier turns in a session (e.g. "now plot that", "solve it symbolically instead"), backed by an in-memory LangGraph checkpointer. Memory lives only in the running process — it's lost on restart and never written to disk.
+The CLI and Discord bot remember earlier turns in a session (e.g. "now plot that", "solve it symbolically instead"), backed by a **SQLite-backed** LangGraph checkpointer (`checkpointer.py`) — conversation history survives a process restart, stored at `MATHFORGE_CHECKPOINT_DB_PATH` (default `agent-core/.mathforge/checkpoints.sqlite3`, gitignored).
 
-- **CLI:** one conversation per run. Type `reset` at the `You:` prompt to start a fresh thread.
+- **CLI:** one conversation per run. Type `reset` at the `You:` prompt to start a fresh thread (the old thread's history stays in the DB, just unreferenced — nothing is deleted).
 - **Discord:** one conversation per user per channel. Add `reset:true` to `/mathforge` to clear it (optionally combined with a new `query` in the same call).
 
 ## Example queries
@@ -102,6 +102,31 @@ After the prompt `You:`, try pasting one of these (the agent will run Python in 
 
 Use `python agent-core/main.py --verbose` if you want to see tool output (stdout from executed code) in the terminal as well.
 
+## Agent design
+
+`agent.py` builds a hand-rolled LangGraph graph, not the prebuilt
+`create_react_agent` — four nodes with distinct jobs instead of one
+undifferentiated LLM-alternates-with-tools loop:
+
+```
+START → planner ⇄ tools           planner reasons and calls execute_python /
+              │                    search_math_knowledge as needed; tools
+              ▼                    node runs every tool_call from one turn
+          verifier                 concurrently (ToolNode, reused as-is)
+              │
+    insufficient, retries left ──► back to planner, with feedback
+              │
+    sufficient, or retries exhausted
+              ▼
+          responder → END
+```
+
+- **planner** — reasons step-by-step, calls tools, and once done writes an internal working summary (not shown to the user).
+- **verifier** — a separate LLM call that reviews the planner's tool outputs and summary for correctness/completeness, forced into a structured `sufficient`/`feedback` decision via tool-calling. If insufficient, it sends feedback back to the planner for another pass — capped at `MATHFORGE_VERIFICATION_MAX_ATTEMPTS` (default 2) so a persistently unsatisfied verifier still terminates instead of looping forever.
+- **responder** — a separate LLM call, not tool-bound, that writes the actual friendly, cited, user-facing final answer from the full transcript.
+
+This means a single user turn can involve multiple Claude calls (planner → tools → planner → verifier → \[planner again, if the verifier pushed back] → responder) before you see a reply — run with `--verbose` to watch each step.
+
 ## RAG knowledge base
 
 `mcp-servers/mathkb-py` is a second MCP server exposing one tool,
@@ -125,7 +150,9 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_MODEL` | Claude model id (default `claude-sonnet-4-6`). |
 | `MATHFORGE_TEMPERATURE` | Sampling temperature. |
 | `MATHFORGE_MAX_TOKENS` | Optional cap on completion tokens. |
-| `MATHFORGE_RECURSION_LIMIT` | LangGraph step / recursion budget for the agent. |
+| `MATHFORGE_RECURSION_LIMIT` | LangGraph node-visit budget for the whole graph. |
+| `MATHFORGE_VERIFICATION_MAX_ATTEMPTS` | Cap on planner↔verifier retry loops per turn (default 2). |
+| `MATHFORGE_CHECKPOINT_DB_PATH` | SQLite conversation-memory DB path. |
 | `MATHFORGE_WORKSPACE_ROOT` | Working directory for code execution and `plots/`. |
 | `MATHFORGE_CODE_TIMEOUT_SEC` | Per-execution timeout (also the sandbox's CPU-time rlimit). |
 | `MATHFORGE_SANDBOX_MCP_BIN` | Path to the compiled `mathforge-sandbox-mcp` binary. |

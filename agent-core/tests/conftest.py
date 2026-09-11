@@ -29,4 +29,6 @@ def dummy_settings(tmp_path) -> Settings:
         qdrant_collection="test-notes",
         voyage_api_key="test-key-not-used",
         voyage_model="voyage-3-lite",
+        checkpoint_db_path=str(tmp_path / "checkpoints.sqlite3"),
+        verification_max_attempts=2,
     )

@@ -1,8 +1,10 @@
 """Tests for ``main.run_turn`` and ``main.async_main`` entry behavior.
 
 Uses stub agents that yield canned message tuples (same shapes LangGraph emits
-under ``stream_mode="messages"``). ``test_async_main_missing_key`` patches
-``load_dotenv`` so a developer ``.env`` file cannot satisfy the missing-key case.
+under ``stream_mode="messages"``, including ``langgraph_node`` in metadata —
+``run_turn`` only prints text from the ``responder`` node, see ``agent.py``).
+``test_async_main_missing_key`` patches ``load_dotenv`` so a developer
+``.env`` file cannot satisfy the missing-key case.
 """
 
 from __future__ import annotations
@@ -13,13 +15,15 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 import main as main_module
 from main import async_main, run_turn
 
+_RESPONDER_META = {"langgraph_node": "responder"}
+
 
 class _FakeStreamAgent:
     """Minimal async agent: streaming chunks or full-message invoke."""
 
     async def astream(self, input_state, config=None, stream_mode=None):
-        yield (AIMessageChunk(content="Hello"), {})
-        yield (AIMessageChunk(content=" world."), {})
+        yield (AIMessageChunk(content="Hello"), _RESPONDER_META)
+        yield (AIMessageChunk(content=" world."), _RESPONDER_META)
 
     async def ainvoke(self, input_state, config=None):
         return {"messages": [HumanMessage("q"), AIMessage(content="Full reply")]}
@@ -35,9 +39,9 @@ class _FakeToolStreamAgent:
                 name="execute_python",
                 tool_call_id="c1",
             ),
-            {},
+            {"langgraph_node": "tools"},
         )
-        yield (AIMessageChunk(content="Done."), {})
+        yield (AIMessageChunk(content="Done."), _RESPONDER_META)
 
 
 class _CapturingAgent:
@@ -48,7 +52,7 @@ class _CapturingAgent:
 
     async def astream(self, input_state, config=None, stream_mode=None):
         self.configs.append(config)
-        yield (AIMessageChunk(content="ok"), {})
+        yield (AIMessageChunk(content="ok"), _RESPONDER_META)
 
     async def ainvoke(self, input_state, config=None):
         self.configs.append(config)
@@ -78,6 +82,36 @@ async def test_run_turn_no_stream(capsys: pytest.CaptureFixture[str]) -> None:
         verbose=False,
     )
     assert "Full reply" in capsys.readouterr().out
+
+
+class _FakePlannerThenResponderAgent:
+    """Yields a non-responder chunk (planner's internal draft) before the real answer."""
+
+    async def astream(self, input_state, config=None, stream_mode=None):
+        yield (
+            AIMessageChunk(content="internal planner draft, not for the user"),
+            {"langgraph_node": "planner"},
+        )
+        yield (AIMessageChunk(content="the real answer"), _RESPONDER_META)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stream_suppresses_non_responder_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only the responder node's text reaches the user (Claude requires a fresh
+    turn to end on a non-assistant message, so planner/verifier are separate
+    LLM calls whose own text is internal, not the answer — see agent.py)."""
+    await run_turn(
+        _FakePlannerThenResponderAgent(),
+        "q",
+        recursion_limit=5,
+        stream=True,
+        verbose=False,
+    )
+    out = capsys.readouterr().out
+    assert "the real answer" in out
+    assert "internal planner draft" not in out
 
 
 @pytest.mark.asyncio
@@ -116,7 +150,7 @@ async def test_run_turn_omits_configurable_without_thread_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_main_reset_command_starts_new_thread(monkeypatch) -> None:
+async def test_async_main_reset_command_starts_new_thread(monkeypatch, tmp_path) -> None:
     """Typing 'reset' between two queries changes the thread_id sent to the agent."""
     from config import Settings
 
@@ -144,6 +178,10 @@ async def test_async_main_reset_command_starts_new_thread(monkeypatch) -> None:
             qdrant_collection="test-notes",
             voyage_api_key="",
             voyage_model="voyage-3-lite",
+            # Real (tmp_path) SQLite file — build_checkpointer runs for real below,
+            # it's fast and self-contained, no need to mock it.
+            checkpoint_db_path=str(tmp_path / "checkpoints.sqlite3"),
+            verification_max_attempts=2,
         ),
     )
 
@@ -152,7 +190,7 @@ async def test_async_main_reset_command_starts_new_thread(monkeypatch) -> None:
 
     monkeypatch.setattr(main_module, "load_mcp_tools", fake_load_mcp_tools)
     monkeypatch.setattr(
-        main_module, "build_react_agent", lambda settings, tools=None, checkpointer=None: agent
+        main_module, "build_agent_graph", lambda settings, tools=None, checkpointer=None: agent
     )
 
     inputs = iter(["hi", "reset", "hi again", "exit"])

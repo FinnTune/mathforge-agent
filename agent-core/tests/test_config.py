@@ -35,6 +35,8 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QDRANT_COLLECTION", "custom-notes")
     monkeypatch.setenv("VOYAGE_API_KEY", "voy-test")
     monkeypatch.setenv("VOYAGE_MODEL", "voyage-3")
+    monkeypatch.setenv("MATHFORGE_CHECKPOINT_DB_PATH", "/opt/mathforge/checkpoints.sqlite3")
+    monkeypatch.setenv("MATHFORGE_VERIFICATION_MAX_ATTEMPTS", "5")
 
     s = load_settings()
     assert s.anthropic_api_key == "sk-test"
@@ -54,12 +56,15 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.qdrant_collection == "custom-notes"
     assert s.voyage_api_key == "voy-test"
     assert s.voyage_model == "voyage-3"
+    assert s.checkpoint_db_path == "/opt/mathforge/checkpoints.sqlite3"
+    assert s.verification_max_attempts == 5
 
 
 def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.delenv("MATHFORGE_SANDBOX_MCP_BIN", raising=False)
     monkeypatch.delenv("MATHFORGE_MATHKB_MCP_PYTHON", raising=False)
+    monkeypatch.delenv("MATHFORGE_CHECKPOINT_DB_PATH", raising=False)
     s = load_settings()
     assert s.sandbox_mcp_bin.endswith("mcp-servers/sandbox-rs/target/release/mathforge-sandbox-mcp")
     assert s.sandbox_python == "python3"
@@ -68,6 +73,8 @@ def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.Mo
     assert s.qdrant_url == "http://localhost:6333"
     assert s.qdrant_collection == "mathforge-math-notes"
     assert s.voyage_model == "voyage-3-lite"
+    assert s.checkpoint_db_path.endswith("agent-core/.mathforge/checkpoints.sqlite3")
+    assert s.verification_max_attempts == 2
 
 
 def test_settings_dataclass_instantiation() -> None:
@@ -90,6 +97,8 @@ def test_settings_dataclass_instantiation() -> None:
         qdrant_collection="mathforge-math-notes",
         voyage_api_key="",
         voyage_model="voyage-3-lite",
+        checkpoint_db_path="/path/to/checkpoints.sqlite3",
+        verification_max_attempts=2,
     )
     assert s.max_tokens == 100
 

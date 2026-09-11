@@ -35,6 +35,10 @@ def _default_mathkb_mcp_script() -> str:
     return str(_repo_root() / "mcp-servers" / "mathkb-py" / "server.py")
 
 
+def _default_checkpoint_db_path() -> str:
+    return str(Path(__file__).resolve().parent / ".mathforge" / "checkpoints.sqlite3")
+
+
 def _env_int(key: str, default: int) -> int:
     """Parse ``key`` as int; empty or missing → ``default``."""
     raw = os.getenv(key)
@@ -80,6 +84,10 @@ class Settings:
     qdrant_collection: str
     voyage_api_key: str
     voyage_model: str
+    # SQLite-backed LangGraph checkpointer — conversation memory survives a restart.
+    checkpoint_db_path: str
+    # Cap on planner<->verifier retry loops (safety net against infinite loops).
+    verification_max_attempts: int
 
 
 def load_settings() -> Settings:
@@ -115,4 +123,6 @@ def load_settings() -> Settings:
         qdrant_collection=os.getenv("QDRANT_COLLECTION", "mathforge-math-notes"),
         voyage_api_key=os.getenv("VOYAGE_API_KEY", ""),
         voyage_model=os.getenv("VOYAGE_MODEL", "voyage-3-lite"),
+        checkpoint_db_path=os.getenv("MATHFORGE_CHECKPOINT_DB_PATH", _default_checkpoint_db_path()),
+        verification_max_attempts=_env_int("MATHFORGE_VERIFICATION_MAX_ATTEMPTS", 2),
     )
