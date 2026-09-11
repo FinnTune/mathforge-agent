@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 
 import chat_pb2
 import chat_pb2_grpc
-from main import check_server_health
+from main import check_server_health, grpc_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ async def run_query(stub: chat_pb2_grpc.MathForgeChatStub, query: str, thread_id
     """Run one query against the gRPC server and return the concatenated final text."""
     request = chat_pb2.ChatRequest(thread_id=thread_id, query=query)
     parts: list[str] = []
-    async for event in stub.Chat(request):
+    async for event in stub.Chat(request, metadata=grpc_metadata()):
         kind = event.WhichOneof("event")
         if kind == "text_delta":
             parts.append(event.text_delta.text)
