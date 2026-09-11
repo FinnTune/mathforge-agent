@@ -1,197 +1,179 @@
-"""Tests for ``main.run_turn`` and ``main.async_main`` entry behavior.
+"""Tests for ``main.py``, the thin gRPC client.
 
-Uses stub agents that yield canned message tuples (same shapes LangGraph emits
-under ``stream_mode="messages"``, including ``langgraph_node`` in metadata —
-``run_turn`` only prints text from the ``responder`` node, see ``agent.py``).
-``test_async_main_missing_key`` patches ``load_dotenv`` so a developer
-``.env`` file cannot satisfy the missing-key case.
+``run_turn``/``check_server_health`` are tested against a fake stub object
+(same DI spirit as the fake LangGraph agents used before this phase — see
+git history) so no real network or server is needed. ``async_main`` is
+tested by monkeypatching ``grpc.aio.insecure_channel`` and
+``chat_pb2_grpc.MathForgeChatStub`` to return the same fake stub — the real
+proto/transport wiring has its own coverage in ``test_grpc_server.py``'s
+loopback test.
 """
 
 from __future__ import annotations
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
+import chat_pb2
 import main as main_module
-from main import async_main, run_turn
-
-_RESPONDER_META = {"langgraph_node": "responder"}
+from main import async_main, check_server_health, run_turn
 
 
-class _FakeStreamAgent:
-    """Minimal async agent: streaming chunks or full-message invoke."""
+class _FakeStub:
+    """Yields canned ``ChatEvent``s / a canned ``HealthCheckResponse``."""
 
-    async def astream(self, input_state, config=None, stream_mode=None):
-        yield (AIMessageChunk(content="Hello"), _RESPONDER_META)
-        yield (AIMessageChunk(content=" world."), _RESPONDER_META)
+    def __init__(self, events=None, health_response=None, health_raises=None) -> None:
+        self._events = events or []
+        self._health_response = health_response
+        self._health_raises = health_raises
+        self.requests: list[chat_pb2.ChatRequest] = []
 
-    async def ainvoke(self, input_state, config=None):
-        return {"messages": [HumanMessage("q"), AIMessage(content="Full reply")]}
+    async def Chat(self, request):
+        self.requests.append(request)
+        for event in self._events:
+            yield event
 
-
-class _FakeToolStreamAgent:
-    """Yields a tool message then a short assistant chunk (verbose-mode test)."""
-
-    async def astream(self, input_state, config=None, stream_mode=None):
-        yield (
-            ToolMessage(
-                content="print(1)",
-                name="execute_python",
-                tool_call_id="c1",
-            ),
-            {"langgraph_node": "tools"},
-        )
-        yield (AIMessageChunk(content="Done."), _RESPONDER_META)
+    async def HealthCheck(self, request):
+        if self._health_raises is not None:
+            raise self._health_raises
+        return self._health_response
 
 
-class _CapturingAgent:
-    """Records the ``config`` passed by ``run_turn`` (checks thread_id plumbing)."""
+class _FakeChannel:
+    """Just enough of a ``grpc.aio.Channel`` for ``async with`` in ``async_main``."""
 
-    def __init__(self) -> None:
-        self.configs: list[dict | None] = []
+    async def __aenter__(self):
+        return self
 
-    async def astream(self, input_state, config=None, stream_mode=None):
-        self.configs.append(config)
-        yield (AIMessageChunk(content="ok"), _RESPONDER_META)
+    async def __aexit__(self, *exc_info):
+        return False
 
-    async def ainvoke(self, input_state, config=None):
-        self.configs.append(config)
-        return {"messages": [HumanMessage("q"), AIMessage(content="ok")]}
+
+@pytest.mark.asyncio
+async def test_check_server_health_reachable() -> None:
+    stub = _FakeStub(health_response=chat_pb2.HealthCheckResponse(ok=True, model="claude-x"))
+    assert await check_server_health(stub) == "claude-x"
+
+
+@pytest.mark.asyncio
+async def test_check_server_health_reports_not_ok_as_unreachable() -> None:
+    stub = _FakeStub(health_response=chat_pb2.HealthCheckResponse(ok=False, model=""))
+    assert await check_server_health(stub) is None
+
+
+@pytest.mark.asyncio
+async def test_check_server_health_unreachable_on_timeout() -> None:
+    stub = _FakeStub(health_raises=TimeoutError())
+    assert await check_server_health(stub) is None
 
 
 @pytest.mark.asyncio
 async def test_run_turn_stream(capsys: pytest.CaptureFixture[str]) -> None:
-    await run_turn(
-        _FakeStreamAgent(),
-        "question",
-        recursion_limit=5,
-        stream=True,
-        verbose=False,
+    stub = _FakeStub(
+        events=[
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="Hello")),
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text=" world.")),
+            chat_pb2.ChatEvent(done=chat_pb2.Done()),
+        ]
     )
+    await run_turn(stub, "question", thread_id="t1", stream=True, verbose=False)
     out = capsys.readouterr().out
     assert "Hello world." in out.replace("\n", "")
+    assert stub.requests[0].thread_id == "t1"
+    assert stub.requests[0].query == "question"
 
 
 @pytest.mark.asyncio
-async def test_run_turn_no_stream(capsys: pytest.CaptureFixture[str]) -> None:
-    await run_turn(
-        _FakeStreamAgent(),
-        "question",
-        recursion_limit=5,
-        stream=False,
-        verbose=False,
+async def test_run_turn_no_stream_buffers_until_done(capsys: pytest.CaptureFixture[str]) -> None:
+    stub = _FakeStub(
+        events=[
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="Full ")),
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="reply")),
+            chat_pb2.ChatEvent(done=chat_pb2.Done()),
+        ]
     )
-    assert "Full reply" in capsys.readouterr().out
-
-
-class _FakePlannerThenResponderAgent:
-    """Yields a non-responder chunk (planner's internal draft) before the real answer."""
-
-    async def astream(self, input_state, config=None, stream_mode=None):
-        yield (
-            AIMessageChunk(content="internal planner draft, not for the user"),
-            {"langgraph_node": "planner"},
-        )
-        yield (AIMessageChunk(content="the real answer"), _RESPONDER_META)
+    await run_turn(stub, "question", thread_id="t1", stream=False, verbose=False)
+    assert "MathForge: Full reply" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
-async def test_run_turn_stream_suppresses_non_responder_text(
+async def test_run_turn_verbose_shows_tool_events(capsys: pytest.CaptureFixture[str]) -> None:
+    stub = _FakeStub(
+        events=[
+            chat_pb2.ChatEvent(
+                tool_call=chat_pb2.ToolCall(
+                    tool_name="execute_python", args_json='{"code": "1+1"}'
+                )
+            ),
+            chat_pb2.ChatEvent(
+                tool_result=chat_pb2.ToolResult(tool_name="execute_python", result="2")
+            ),
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="Two.")),
+            chat_pb2.ChatEvent(done=chat_pb2.Done()),
+        ]
+    )
+    await run_turn(stub, "1+1", thread_id="t1", stream=True, verbose=True)
+    out = capsys.readouterr().out
+    assert "[calling execute_python]" in out
+    assert "[tool:execute_python]" in out
+    assert "2" in out
+
+
+@pytest.mark.asyncio
+async def test_run_turn_hides_tool_events_without_verbose(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Only the responder node's text reaches the user (Claude requires a fresh
-    turn to end on a non-assistant message, so planner/verifier are separate
-    LLM calls whose own text is internal, not the answer — see agent.py)."""
-    await run_turn(
-        _FakePlannerThenResponderAgent(),
-        "q",
-        recursion_limit=5,
-        stream=True,
-        verbose=False,
+    stub = _FakeStub(
+        events=[
+            chat_pb2.ChatEvent(
+                tool_call=chat_pb2.ToolCall(tool_name="execute_python", args_json="{}")
+            ),
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="Answer.")),
+            chat_pb2.ChatEvent(done=chat_pb2.Done()),
+        ]
     )
+    await run_turn(stub, "q", thread_id="t1", stream=True, verbose=False)
     out = capsys.readouterr().out
-    assert "the real answer" in out
-    assert "internal planner draft" not in out
+    assert "[calling" not in out
+    assert "Answer." in out
 
 
 @pytest.mark.asyncio
-async def test_run_turn_verbose_tool(capsys: pytest.CaptureFixture[str]) -> None:
-    await run_turn(
-        _FakeToolStreamAgent(),
-        "q",
-        recursion_limit=5,
-        stream=True,
-        verbose=True,
+async def test_run_turn_prints_error_event(capsys: pytest.CaptureFixture[str]) -> None:
+    stub = _FakeStub(
+        events=[chat_pb2.ChatEvent(error=chat_pb2.Error(message="sandbox unreachable"))]
     )
-    out = capsys.readouterr().out
-    assert "[tool:execute_python]" in out
-    assert "print(1)" in out
+    await run_turn(stub, "q", thread_id="t1", stream=True, verbose=False)
+    err = capsys.readouterr().err
+    assert "sandbox unreachable" in err
 
 
 @pytest.mark.asyncio
-async def test_run_turn_streaming_passes_thread_id() -> None:
-    agent = _CapturingAgent()
-    await run_turn(agent, "q", recursion_limit=5, stream=True, verbose=False, thread_id="abc")
-    assert agent.configs[0]["configurable"]["thread_id"] == "abc"
-
-
-@pytest.mark.asyncio
-async def test_run_turn_no_stream_passes_thread_id() -> None:
-    agent = _CapturingAgent()
-    await run_turn(agent, "q", recursion_limit=5, stream=False, verbose=False, thread_id="xyz")
-    assert agent.configs[0]["configurable"]["thread_id"] == "xyz"
-
-
-@pytest.mark.asyncio
-async def test_run_turn_omits_configurable_without_thread_id() -> None:
-    agent = _CapturingAgent()
-    await run_turn(agent, "q", recursion_limit=5, stream=False, verbose=False)
-    assert "configurable" not in agent.configs[0]
-
-
-@pytest.mark.asyncio
-async def test_async_main_reset_command_starts_new_thread(monkeypatch, tmp_path) -> None:
-    """Typing 'reset' between two queries changes the thread_id sent to the agent."""
-    from config import Settings
-
-    agent = _CapturingAgent()
-    monkeypatch.setattr(main_module, "load_dotenv", lambda *_, **__: None)
+async def test_async_main_missing_server(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main_module.grpc.aio, "insecure_channel", lambda target: _FakeChannel())
     monkeypatch.setattr(
-        main_module,
-        "load_settings",
-        lambda: Settings(
-            anthropic_api_key="test-key",
-            model="claude-sonnet-4-6",
-            temperature=0.0,
-            max_tokens=None,
-            recursion_limit=15,
-            code_timeout_sec=5.0,
-            workspace_root=".",
-            log_level="DEBUG",
-            sandbox_mcp_bin="/nonexistent/mathforge-sandbox-mcp",
-            sandbox_python="python3",
-            sandbox_max_memory_mb=512,
-            sandbox_max_output_bytes=256_000,
-            mathkb_mcp_python="/nonexistent/mathkb-python",
-            mathkb_mcp_script="/nonexistent/server.py",
-            qdrant_url="http://localhost:6333",
-            qdrant_collection="test-notes",
-            voyage_api_key="",
-            voyage_model="voyage-3-lite",
-            # Real (tmp_path) SQLite file — build_checkpointer runs for real below,
-            # it's fast and self-contained, no need to mock it.
-            checkpoint_db_path=str(tmp_path / "checkpoints.sqlite3"),
-            verification_max_attempts=2,
-        ),
+        main_module.chat_pb2_grpc,
+        "MathForgeChatStub",
+        lambda channel: _FakeStub(health_raises=TimeoutError()),
     )
+    code = await async_main([])
+    assert code == 1
+    assert "mathforge-server" in capsys.readouterr().err
 
-    async def fake_load_mcp_tools(settings):
-        return []
 
-    monkeypatch.setattr(main_module, "load_mcp_tools", fake_load_mcp_tools)
-    monkeypatch.setattr(
-        main_module, "build_agent_graph", lambda settings, tools=None, checkpointer=None: agent
+@pytest.mark.asyncio
+async def test_async_main_reset_command_starts_new_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Typing 'reset' between two queries changes the thread_id sent to the server."""
+    stub = _FakeStub(
+        health_response=chat_pb2.HealthCheckResponse(ok=True, model="claude-x"),
+        events=[
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="ok")),
+            chat_pb2.ChatEvent(done=chat_pb2.Done()),
+        ],
     )
+    monkeypatch.setattr(main_module.grpc.aio, "insecure_channel", lambda target: _FakeChannel())
+    monkeypatch.setattr(main_module.chat_pb2_grpc, "MathForgeChatStub", lambda channel: stub)
 
     inputs = iter(["hi", "reset", "hi again", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
@@ -199,16 +181,6 @@ async def test_async_main_reset_command_starts_new_thread(monkeypatch, tmp_path)
     code = await async_main([])
 
     assert code == 0
-    thread_ids = [c["configurable"]["thread_id"] for c in agent.configs]
+    thread_ids = [r.thread_id for r in stub.requests]
     assert len(thread_ids) == 2
     assert thread_ids[0] != thread_ids[1]
-
-
-@pytest.mark.asyncio
-async def test_async_main_missing_key(capsys: pytest.CaptureFixture[str], monkeypatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr(main_module, "load_dotenv", lambda *_, **__: None)
-    code = await async_main([])
-    assert code == 1
-    err = capsys.readouterr().err
-    assert "ANTHROPIC_API_KEY" in err

@@ -88,6 +88,10 @@ class Settings:
     checkpoint_db_path: str
     # Cap on planner<->verifier retry loops (safety net against infinite loops).
     verification_max_attempts: int
+    # gRPC server bind address (grpc_server.py). Clients use MATHFORGE_GRPC_TARGET
+    # directly (see main.py/discord_bot.py) rather than this Settings dataclass.
+    grpc_host: str
+    grpc_port: int
 
 
 def load_settings() -> Settings:
@@ -125,4 +129,6 @@ def load_settings() -> Settings:
         voyage_model=os.getenv("VOYAGE_MODEL", "voyage-3-lite"),
         checkpoint_db_path=os.getenv("MATHFORGE_CHECKPOINT_DB_PATH", _default_checkpoint_db_path()),
         verification_max_attempts=_env_int("MATHFORGE_VERIFICATION_MAX_ATTEMPTS", 2),
+        grpc_host=os.getenv("MATHFORGE_GRPC_HOST", "127.0.0.1"),
+        grpc_port=_env_int("MATHFORGE_GRPC_PORT", 50051),
     )

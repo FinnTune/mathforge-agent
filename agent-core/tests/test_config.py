@@ -37,6 +37,8 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VOYAGE_MODEL", "voyage-3")
     monkeypatch.setenv("MATHFORGE_CHECKPOINT_DB_PATH", "/opt/mathforge/checkpoints.sqlite3")
     monkeypatch.setenv("MATHFORGE_VERIFICATION_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("MATHFORGE_GRPC_HOST", "0.0.0.0")
+    monkeypatch.setenv("MATHFORGE_GRPC_PORT", "9999")
 
     s = load_settings()
     assert s.anthropic_api_key == "sk-test"
@@ -58,6 +60,8 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.voyage_model == "voyage-3"
     assert s.checkpoint_db_path == "/opt/mathforge/checkpoints.sqlite3"
     assert s.verification_max_attempts == 5
+    assert s.grpc_host == "0.0.0.0"
+    assert s.grpc_port == 9999
 
 
 def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,6 +79,8 @@ def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.Mo
     assert s.voyage_model == "voyage-3-lite"
     assert s.checkpoint_db_path.endswith("agent-core/.mathforge/checkpoints.sqlite3")
     assert s.verification_max_attempts == 2
+    assert s.grpc_host == "127.0.0.1"
+    assert s.grpc_port == 50051
 
 
 def test_settings_dataclass_instantiation() -> None:
@@ -99,6 +105,8 @@ def test_settings_dataclass_instantiation() -> None:
         voyage_model="voyage-3-lite",
         checkpoint_db_path="/path/to/checkpoints.sqlite3",
         verification_max_attempts=2,
+        grpc_host="127.0.0.1",
+        grpc_port=50051,
     )
     assert s.max_tokens == 100
 

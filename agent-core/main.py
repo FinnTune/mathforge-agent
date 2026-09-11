@@ -1,21 +1,21 @@
-"""Interactive CLI: read stdin, run the LangGraph agent, print replies.
+"""Interactive CLI: a thin gRPC client for the MathForge agent server.
 
 Flow:
-1. ``load_dotenv()`` loads ``.env`` into the environment (does not override
-   variables already set in the shell unless you change that in python-dotenv).
-2. ``load_settings()`` validates ``ANTHROPIC_API_KEY`` and reads MathForge options.
-3. ``mcp_client.load_mcp_tools()`` spawns the sandbox (Rust,
-   ``mcp-servers/sandbox-rs``) and mathkb (Python, ``mcp-servers/mathkb-py``)
-   MCP servers and returns their tools as LangChain tools.
-4. The agent is built with a SQLite-backed checkpointer
-   (``checkpointer.build_checkpointer``) keyed by a per-session ``thread_id``,
-   so the REPL remembers earlier turns ("plot that", "now solve it
-   symbolically") — and, unlike the old in-memory checkpointer, that memory
-   survives a process restart. Typing ``reset`` starts a fresh thread (the
-   old one's history stays in the DB, just unreferenced).
-
-Streaming uses LangGraph ``stream_mode="messages"``, which yields ``(message, metadata)``
-tuples as the graph runs. We print assistant tokens and optionally tool results.
+1. ``load_dotenv()`` loads ``.env`` (only ``MATHFORGE_GRPC_TARGET`` matters
+   here — everything else, API keys included, is the server's concern now;
+   see ``grpc_server.py``).
+2. Connects to ``MATHFORGE_GRPC_TARGET`` (default ``127.0.0.1:50051``) and
+   calls ``HealthCheck`` once, so a server that isn't running fails with a
+   clear message instead of a raw connection-refused traceback on the first
+   query.
+3. Each REPL turn calls the streaming ``Chat`` RPC (``proto/chat.proto``) and
+   prints ``text_delta`` events live — that's the responder node's output
+   only; the server already filters out the planner's internal reasoning and
+   the verifier's structured decision (see ``grpc_server.py``). ``tool_call``/
+   ``tool_result`` events print under ``--verbose``.
+4. ``reset`` just starts a new ``thread_id`` client-side — the server needs
+   no request for that, conversation memory for the old thread simply stays
+   unreferenced in its SQLite DB.
 """
 
 from __future__ import annotations
@@ -23,113 +23,97 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import uuid
 
+import grpc
 from dotenv import load_dotenv
-from langchain_core.messages import (
-    AIMessage,
-    AIMessageChunk,
-    BaseMessage,
-    HumanMessage,
-    ToolMessage,
-)
 
-from agent import build_agent_graph
-from checkpointer import build_checkpointer
-from config import load_settings
-from mcp_client import load_mcp_tools
+import chat_pb2
+import chat_pb2_grpc
+
+HEALTH_CHECK_TIMEOUT_SEC = 5.0
 
 
-def _configure_logging(level: str) -> None:
-    """Initialize the root logger once; level names match ``logging`` constants."""
+def _configure_logging() -> None:
+    level = os.getenv("MATHFORGE_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
     )
 
 
-def _print_tool_event(message: ToolMessage, *, verbose: bool) -> None:
-    """Echo tool output when ``--verbose`` is set (can be large; we cap preview)."""
+def _print_tool_call(event: chat_pb2.ToolCall, *, verbose: bool) -> None:
     if not verbose:
         return
-    name = getattr(message, "name", "tool")
-    content = message.content
-    preview = content if len(content) < 2000 else content[:2000] + "…"
-    print(f"\n[tool:{name}]\n{preview}\n", flush=True)
+    print(f"\n[calling {event.tool_name}] {event.args_json}\n", flush=True)
 
 
-def _emit_ai_text(message: BaseMessage) -> None:
-    """Print assistant-visible text; handles string content and simple multimodal blocks."""
-    content = getattr(message, "content", None)
-    if not content:
+def _print_tool_result(event: chat_pb2.ToolResult, *, verbose: bool) -> None:
+    if not verbose:
         return
-    if isinstance(content, str):
-        print(content, end="", flush=True)
-        return
-    # Claude may return structured content blocks; we only surface text parts.
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "text":
-            print(block.get("text", ""), end="", flush=True)
-        elif isinstance(block, str):
-            print(block, end="", flush=True)
+    preview = event.result if len(event.result) < 2000 else event.result[:2000] + "…"
+    print(f"\n[tool:{event.tool_name}]\n{preview}\n", flush=True)
+
+
+async def check_server_health(stub: chat_pb2_grpc.MathForgeChatStub) -> str | None:
+    """Return the server's reported model name, or ``None`` if unreachable."""
+    try:
+        response = await asyncio.wait_for(
+            stub.HealthCheck(chat_pb2.HealthCheckRequest()), timeout=HEALTH_CHECK_TIMEOUT_SEC
+        )
+    except (grpc.aio.AioRpcError, TimeoutError):
+        return None
+    return response.model if response.ok else None
 
 
 async def run_turn(
-    agent,
+    stub: chat_pb2_grpc.MathForgeChatStub,
     query: str,
     *,
-    recursion_limit: int,
+    thread_id: str,
     stream: bool,
     verbose: bool,
-    thread_id: str | None = None,
 ) -> None:
-    """Run one user query through the compiled graph (streaming or whole-message).
+    """Run one turn against the gRPC server (streaming print, or buffer-then-print)."""
+    request = chat_pb2.ChatRequest(thread_id=thread_id, query=query)
+    buffer: list[str] = []
+    if stream:
+        print("MathForge: ", end="", flush=True)
 
-    ``thread_id`` scopes conversation memory when the agent was built with a
-    checkpointer; only the new ``HumanMessage`` is sent each turn and prior
-    history is loaded from the checkpoint. Omit for a stateless call (tests).
-    """
-    input_state = {"messages": [HumanMessage(content=query)]}
-    config: dict = {"recursion_limit": recursion_limit}
-    if thread_id is not None:
-        config["configurable"] = {"thread_id": thread_id}
-
-    if not stream:
-        result = await agent.ainvoke(input_state, config=config)
-        final = result["messages"][-1].content
-        print(f"MathForge: {final}\n", flush=True)
+    try:
+        async for event in stub.Chat(request):
+            kind = event.WhichOneof("event")
+            if kind == "text_delta":
+                if stream:
+                    print(event.text_delta.text, end="", flush=True)
+                else:
+                    buffer.append(event.text_delta.text)
+            elif kind == "tool_call":
+                _print_tool_call(event.tool_call, verbose=verbose)
+            elif kind == "tool_result":
+                _print_tool_result(event.tool_result, verbose=verbose)
+            elif kind == "error":
+                print(f"\nError: {event.error.message}", file=sys.stderr)
+                return
+            elif kind == "done":
+                break
+    except grpc.aio.AioRpcError as exc:
+        print(f"\nRequest failed: {exc.details()}", file=sys.stderr)
         return
 
-    print("MathForge: ", end="", flush=True)
-    # If the model streams chunks, we avoid printing the final full AIMessage again
-    # (would duplicate text). Non-streaming models only emit AIMessage → we print once.
-    streamed_text = False
-    async for item in agent.astream(input_state, config=config, stream_mode="messages"):
-        if not isinstance(item, tuple) or not item:
-            continue
-        message, metadata = item[0], (item[1] if len(item) > 1 else {})
-        if isinstance(message, ToolMessage):
-            _print_tool_event(message, verbose=verbose)
-            continue
-        # Only the responder node writes the user-facing answer — the planner's
-        # own non-tool-call messages are its internal working notes, and the
-        # verifier's are a forced structured decision with no prose content.
-        if metadata.get("langgraph_node") != "responder":
-            continue
-        if isinstance(message, AIMessageChunk):
-            if message.content:
-                streamed_text = True
-            _emit_ai_text(message)
-        elif isinstance(message, AIMessage) and message.content and not streamed_text:
-            _emit_ai_text(message)
-    print("\n", flush=True)
+    if stream:
+        print("\n", flush=True)
+    else:
+        print(f"MathForge: {''.join(buffer)}\n", flush=True)
 
 
 async def async_main(argv: list[str] | None = None) -> int:
-    """Parse CLI args, build the agent, run the REPL loop. Returns a process exit code."""
+    """Parse CLI args, connect to the gRPC server, run the REPL loop. Returns an exit code."""
     load_dotenv()
-    parser = argparse.ArgumentParser(description="MathForge — Claude + sandboxed Python")
+    _configure_logging()
+    parser = argparse.ArgumentParser(description="MathForge — thin gRPC client")
     parser.add_argument(
         "--no-stream",
         action="store_true",
@@ -138,37 +122,25 @@ async def async_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Print tool outputs to the terminal",
+        help="Print tool calls/outputs to the terminal",
     )
     args = parser.parse_args(argv)
 
-    try:
-        settings = load_settings()
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-
-    _configure_logging(settings.log_level)
-    try:
-        tools = await load_mcp_tools(settings)
-    except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
-        logging.exception("Failed to load MCP tools")
-        print(f"Could not start agent: {exc}", file=sys.stderr)
-        return 1
-
-    # The checkpointer's DB connection must stay open for the whole REPL
-    # session (unlike the MCP tool sessions above, which are one-shot).
-    async with build_checkpointer(settings) as checkpointer:
-        try:
-            agent = build_agent_graph(settings, tools=tools, checkpointer=checkpointer)
-        except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
-            logging.exception("Failed to build agent")
-            print(f"Could not start agent: {exc}", file=sys.stderr)
+    target = os.getenv("MATHFORGE_GRPC_TARGET", "127.0.0.1:50051")
+    async with grpc.aio.insecure_channel(target) as channel:
+        stub = chat_pb2_grpc.MathForgeChatStub(channel)
+        model = await check_server_health(stub)
+        if model is None:
+            print(
+                f"Could not reach MathForge gRPC server at {target}. "
+                "Is `mathforge-server` running? (see README Quick Start)",
+                file=sys.stderr,
+            )
             return 1
 
         stream = not args.no_stream
         thread_id = str(uuid.uuid4())
-        print("Welcome to MathForge (Claude + hardened sandbox). Commands: exit, quit, reset.\n")
+        print(f"Welcome to MathForge (server model: {model}). Commands: exit, quit, reset.\n")
         while True:
             try:
                 query = input("You: ")
@@ -188,20 +160,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                 continue
 
             print("", flush=True)
-            try:
-                await run_turn(
-                    agent,
-                    stripped,
-                    recursion_limit=settings.recursion_limit,
-                    stream=stream,
-                    verbose=args.verbose,
-                    thread_id=thread_id,
-                )
-            except TimeoutError:
-                print("Request timed out.", file=sys.stderr)
-            except Exception as exc:  # noqa: BLE001 — network/API errors land here
-                logging.exception("Agent run failed")
-                print(f"Error: {exc}", file=sys.stderr)
+            await run_turn(stub, stripped, thread_id=thread_id, stream=stream, verbose=args.verbose)
 
 
 def main() -> None:

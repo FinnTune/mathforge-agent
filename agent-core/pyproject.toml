@@ -27,6 +27,9 @@ dependencies = [
     "langchain-mcp-adapters==0.3.2",
     # Persistent (SQLite-backed) LangGraph checkpointer — see checkpointer.py.
     "langgraph-checkpoint-sqlite==3.1.1",
+    # gRPC: grpc_server.py serves the agent; main.py/discord_bot.py are thin
+    # clients (see proto/chat.proto). Generated stubs: scripts/generate_proto.sh.
+    "grpcio==1.83.1",
 ]
 
 [project.optional-dependencies]
@@ -35,16 +38,31 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "ruff>=0.8",
+    # protoc codegen only — not needed at runtime, see scripts/generate_proto.sh.
+    "grpcio-tools==1.83.1",
 ]
 
 [project.scripts]
 # After install: `mathforge` on PATH calls `main.main()`.
 mathforge = "main:main"
 mathforge-discord = "discord_bot:main"
+mathforge-server = "grpc_server:main"
 
 [tool.setuptools]
-# Flat layout: top-level modules, not a `src/` package.
-py-modules = ["agent", "checkpointer", "config", "discord_bot", "main", "mcp_client"]
+# Flat layout: top-level modules, not a `src/` package. chat_pb2/chat_pb2_grpc
+# are generated (scripts/generate_proto.sh) and gitignored, not present until
+# that script runs.
+py-modules = [
+    "agent",
+    "chat_pb2",
+    "chat_pb2_grpc",
+    "checkpointer",
+    "config",
+    "discord_bot",
+    "grpc_server",
+    "main",
+    "mcp_client",
+]
 
 [tool.pytest.ini_options]
 # pytest-asyncio: async tests without explicit loop fixtures.

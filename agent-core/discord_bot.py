@@ -1,19 +1,18 @@
 """Discord interface for MathForge via a slash command.
 
-This module wraps the existing LangGraph agent with a Discord bot so Discord is
-just another transport (CLI remains unchanged). The bot:
+A thin gRPC client (see ``main.py``'s module docstring for the general shape
+of that split) so Discord is just another transport in front of the one
+``mathforge-server`` process — the bot itself no longer builds a LangGraph
+agent, loads MCP tools, or touches the checkpointer directly. The bot:
 
 - registers `/mathforge query:<text> reset:<bool>`
 - enforces optional channel allowlist and prompt length limits
-- runs the same compiled agent used by CLI, with per-channel-per-user
-  conversation memory (a SQLite-backed LangGraph checkpointer keyed by
-  ``"<channel_id>:<user_id>:<generation>"``; ``reset:true`` bumps the
-  generation to start a fresh thread)
+- calls the streaming ``Chat`` RPC per query and concatenates its
+  ``text_delta`` events into one reply (Discord doesn't stream), with
+  per-channel-per-user conversation memory via ``thread_id`` (server-side,
+  SQLite-backed — see ``checkpointer.py``); ``reset:true`` bumps a
+  generation counter to start a fresh thread, same as before
 - chunks long replies to satisfy Discord message limits
-
-Memory is SQLite-backed (``checkpointer.build_checkpointer``), so it survives
-a bot restart; it's still local to this process's DB file, not shared across
-multiple bot instances.
 """
 
 from __future__ import annotations
@@ -23,17 +22,16 @@ import logging
 import os
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 
 import discord
+import grpc
 from discord import app_commands
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
 
-from agent import build_agent_graph
-from checkpointer import build_checkpointer
-from config import load_settings
-from mcp_client import load_mcp_tools
+import chat_pb2
+import chat_pb2_grpc
+from main import check_server_health
 
 logger = logging.getLogger(__name__)
 
@@ -69,41 +67,33 @@ def chunk_text(text: str, size: int = 1900) -> Iterator[str]:
         yield text[i : i + size]
 
 
-def coerce_content_to_text(content: object) -> str:
-    """Normalize LangChain message content to plain text for Discord."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, Iterable):
-        pieces: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                pieces.append(str(block.get("text", "")))
-            elif isinstance(block, str):
-                pieces.append(block)
-        if pieces:
-            return "".join(pieces)
-    return str(content)
-
-
 def thread_key(channel_id: int | None, user_id: int, generation: int) -> str:
-    """Build the checkpointer ``thread_id`` for one channel+user conversation."""
+    """Build the gRPC ``thread_id`` for one channel+user conversation."""
     return f"{channel_id}:{user_id}:{generation}"
 
 
-async def run_query(agent, query: str, recursion_limit: int, thread_id: str) -> str:
-    """Execute one query against the compiled graph and return final text."""
-    result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=query)]},
-        config={"recursion_limit": recursion_limit, "configurable": {"thread_id": thread_id}},
-    )
-    final = result["messages"][-1].content
-    return coerce_content_to_text(final).strip() or "(empty response)"
+async def run_query(stub: chat_pb2_grpc.MathForgeChatStub, query: str, thread_id: str) -> str:
+    """Run one query against the gRPC server and return the concatenated final text."""
+    request = chat_pb2.ChatRequest(thread_id=thread_id, query=query)
+    parts: list[str] = []
+    async for event in stub.Chat(request):
+        kind = event.WhichOneof("event")
+        if kind == "text_delta":
+            parts.append(event.text_delta.text)
+        elif kind == "error":
+            raise RuntimeError(event.error.message)
+        elif kind == "done":
+            break
+    return "".join(parts).strip() or "(empty response)"
 
 
 async def async_main() -> int:
     """Run the Discord bot process."""
     load_dotenv()
-    settings = load_settings()
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("MATHFORGE_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     if not token:
@@ -115,17 +105,20 @@ async def async_main() -> int:
     dev_guild_id_raw = os.getenv("DISCORD_DEV_GUILD_ID", "").strip()
     dev_guild_id = int(dev_guild_id_raw) if dev_guild_id_raw else None
 
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    target = os.getenv("MATHFORGE_GRPC_TARGET", "127.0.0.1:50051")
+    # The gRPC channel must stay open for the whole bot process lifetime,
+    # same reasoning as the checkpointer connection did before this phase.
+    async with grpc.aio.insecure_channel(target) as channel:
+        stub = chat_pb2_grpc.MathForgeChatStub(channel)
+        model = await check_server_health(stub)
+        if model is None:
+            print(
+                f"Could not reach MathForge gRPC server at {target}. "
+                "Is `mathforge-server` running?"
+            )
+            return 1
+        logger.info("Connected to MathForge gRPC server at %s (model=%s)", target, model)
 
-    tools = await load_mcp_tools(settings)
-
-    # The checkpointer's DB connection must stay open for the whole bot
-    # process lifetime (unlike the MCP tool sessions above, which are one-shot).
-    async with build_checkpointer(settings) as checkpointer:
-        agent = build_agent_graph(settings, tools=tools, checkpointer=checkpointer)
         intents = discord.Intents.default()
         client = discord.Client(intents=intents)
         tree = app_commands.CommandTree(client)
@@ -198,7 +191,7 @@ async def async_main() -> int:
             thread_id = thread_key(channel_id, user_id, generation_by_thread[thread_key_id])
             await interaction.response.defer(thinking=True)
             try:
-                answer = await run_query(agent, query, settings.recursion_limit, thread_id)
+                answer = await run_query(stub, query, thread_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Discord query failed")
                 await interaction.followup.send(f"Error: {exc}")
