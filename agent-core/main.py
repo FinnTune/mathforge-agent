@@ -7,10 +7,12 @@ Flow:
 3. ``mcp_client.load_mcp_tools()`` spawns the sandbox (Rust,
    ``mcp-servers/sandbox-rs``) and mathkb (Python, ``mcp-servers/mathkb-py``)
    MCP servers and returns their tools as LangChain tools.
-4. The agent is built with an in-memory checkpointer keyed by a per-session
-   ``thread_id``, so the REPL remembers earlier turns ("plot that", "now solve
-   it symbolically"). Typing ``reset`` starts a fresh thread. Memory lives only
-   for the lifetime of the process — nothing is persisted to disk.
+4. The agent is built with a SQLite-backed checkpointer
+   (``checkpointer.build_checkpointer``) keyed by a per-session ``thread_id``,
+   so the REPL remembers earlier turns ("plot that", "now solve it
+   symbolically") — and, unlike the old in-memory checkpointer, that memory
+   survives a process restart. Typing ``reset`` starts a fresh thread (the
+   old one's history stays in the DB, just unreferenced).
 
 Streaming uses LangGraph ``stream_mode="messages"``, which yields ``(message, metadata)``
 tuples as the graph runs. We print assistant tokens and optionally tool results.
@@ -32,9 +34,9 @@ from langchain_core.messages import (
     HumanMessage,
     ToolMessage,
 )
-from langgraph.checkpoint.memory import InMemorySaver
 
-from agent import build_react_agent
+from agent import build_agent_graph
+from checkpointer import build_checkpointer
 from config import load_settings
 from mcp_client import load_mcp_tools
 
@@ -106,10 +108,16 @@ async def run_turn(
     async for item in agent.astream(input_state, config=config, stream_mode="messages"):
         if not isinstance(item, tuple) or not item:
             continue
-        message = item[0]
+        message, metadata = item[0], (item[1] if len(item) > 1 else {})
         if isinstance(message, ToolMessage):
             _print_tool_event(message, verbose=verbose)
-        elif isinstance(message, AIMessageChunk):
+            continue
+        # Only the responder node writes the user-facing answer — the planner's
+        # own non-tool-call messages are its internal working notes, and the
+        # verifier's are a forced structured decision with no prose content.
+        if metadata.get("langgraph_node") != "responder":
+            continue
+        if isinstance(message, AIMessageChunk):
             if message.content:
                 streamed_text = True
             _emit_ai_text(message)
@@ -143,48 +151,57 @@ async def async_main(argv: list[str] | None = None) -> int:
     _configure_logging(settings.log_level)
     try:
         tools = await load_mcp_tools(settings)
-        agent = build_react_agent(settings, tools=tools, checkpointer=InMemorySaver())
     except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
-        logging.exception("Failed to build agent")
+        logging.exception("Failed to load MCP tools")
         print(f"Could not start agent: {exc}", file=sys.stderr)
         return 1
 
-    stream = not args.no_stream
-    thread_id = str(uuid.uuid4())
-    print("Welcome to MathForge (Claude + subprocess sandbox). Commands: exit, quit, reset.\n")
-    while True:
+    # The checkpointer's DB connection must stay open for the whole REPL
+    # session (unlike the MCP tool sessions above, which are one-shot).
+    async with build_checkpointer(settings) as checkpointer:
         try:
-            query = input("You: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            return 0
+            agent = build_agent_graph(settings, tools=tools, checkpointer=checkpointer)
+        except Exception as exc:  # noqa: BLE001 — surface setup errors to the user
+            logging.exception("Failed to build agent")
+            print(f"Could not start agent: {exc}", file=sys.stderr)
+            return 1
 
-        stripped = query.strip()
-        if stripped.lower() in {"exit", "quit"}:
-            print("Goodbye!")
-            return 0
-        if stripped.lower() == "reset":
-            thread_id = str(uuid.uuid4())
-            print("Conversation memory cleared.\n")
-            continue
-        if not stripped:
-            continue
+        stream = not args.no_stream
+        thread_id = str(uuid.uuid4())
+        print("Welcome to MathForge (Claude + hardened sandbox). Commands: exit, quit, reset.\n")
+        while True:
+            try:
+                query = input("You: ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                return 0
 
-        print("", flush=True)
-        try:
-            await run_turn(
-                agent,
-                stripped,
-                recursion_limit=settings.recursion_limit,
-                stream=stream,
-                verbose=args.verbose,
-                thread_id=thread_id,
-            )
-        except TimeoutError:
-            print("Request timed out.", file=sys.stderr)
-        except Exception as exc:  # noqa: BLE001 — network/API errors land here
-            logging.exception("Agent run failed")
-            print(f"Error: {exc}", file=sys.stderr)
+            stripped = query.strip()
+            if stripped.lower() in {"exit", "quit"}:
+                print("Goodbye!")
+                return 0
+            if stripped.lower() == "reset":
+                thread_id = str(uuid.uuid4())
+                print("Conversation memory cleared.\n")
+                continue
+            if not stripped:
+                continue
+
+            print("", flush=True)
+            try:
+                await run_turn(
+                    agent,
+                    stripped,
+                    recursion_limit=settings.recursion_limit,
+                    stream=stream,
+                    verbose=args.verbose,
+                    thread_id=thread_id,
+                )
+            except TimeoutError:
+                print("Request timed out.", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 — network/API errors land here
+                logging.exception("Agent run failed")
+                print(f"Error: {exc}", file=sys.stderr)
 
 
 def main() -> None:

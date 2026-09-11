@@ -1,8 +1,9 @@
-"""Tests for ``agent.build_react_agent`` and ``build_llm``.
+"""Tests for ``agent.build_agent_graph`` and ``build_llm``.
 
-Uses ``ScriptedToolModel`` so no Anthropic API calls occur. Verifies tool-then-
-answer ReAct flow, streaming smoke, and that ``max_tokens`` is forwarded to
-``ChatAnthropic`` when set.
+Uses ``ScriptedToolModel`` so no Anthropic API calls occur. Every node
+(planner, verifier, responder) shares one model instance, so a scripted test
+scripts one ``AIMessage`` per node visited, in call order — see the module
+docstring in ``agent.py`` for why.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent import build_react_agent
+from agent import build_agent_graph
 from tests.helpers import (
     ScriptedToolModel,
     make_fake_execute_python_tool,
@@ -21,8 +22,25 @@ from tests.helpers import (
 )
 
 
+def _verification_message(
+    *, sufficient: bool, feedback: str = "", call_id: str = "v1"
+) -> AIMessage:
+    """A scripted verifier response forcing a VerificationDecision tool call."""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "VerificationDecision",
+                "args": {"sufficient": sufficient, "feedback": feedback},
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
 @pytest.mark.asyncio
-async def test_react_loop_tool_then_answer(dummy_settings) -> None:
+async def test_graph_happy_path_tool_then_verify_then_respond(dummy_settings) -> None:
     model = ScriptedToolModel(
         [
             AIMessage(
@@ -36,50 +54,21 @@ async def test_react_loop_tool_then_answer(dummy_settings) -> None:
                     }
                 ],
             ),
-            AIMessage(content="1024 is the answer."),
+            AIMessage(content="I computed 2**10 = 1024."),  # planner done, no more tools
+            _verification_message(sufficient=True),
+            AIMessage(content="1024 is the answer."),  # responder's final answer
         ]
     )
-    agent = build_react_agent(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
+    agent = build_agent_graph(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
     result = await agent.ainvoke(
         {"messages": [HumanMessage("Compute 2**10")]},
         config={"recursion_limit": dummy_settings.recursion_limit},
     )
-    texts = [m.content for m in result["messages"] if isinstance(m, AIMessage) and m.content]
-    assert any("1024" in str(t) for t in texts)
+    assert result["messages"][-1].content == "1024 is the answer."
 
 
 @pytest.mark.asyncio
-async def test_stream_messages_yields_tool_and_ai(dummy_settings) -> None:
-    model = ScriptedToolModel(
-        [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "execute_python",
-                        "args": {"code": "print('hi')"},
-                        "id": "c2",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(content="Done."),
-        ]
-    )
-    agent = build_react_agent(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
-    chunks: list = []
-    async for item in agent.astream(
-        {"messages": [HumanMessage("Hi")]},
-        config={"recursion_limit": dummy_settings.recursion_limit},
-        stream_mode="messages",
-    ):
-        chunks.append(item)
-
-    assert chunks, "expected stream events"
-
-
-@pytest.mark.asyncio
-async def test_react_loop_routes_to_search_math_knowledge(dummy_settings) -> None:
+async def test_graph_routes_to_search_math_knowledge(dummy_settings) -> None:
     model = ScriptedToolModel(
         [
             AIMessage(
@@ -93,10 +82,12 @@ async def test_react_loop_routes_to_search_math_knowledge(dummy_settings) -> Non
                     }
                 ],
             ),
+            AIMessage(content="Per the notes, use numpy.linalg.eig."),
+            _verification_message(sufficient=True),
             AIMessage(content="Per linear_algebra.md, use numpy.linalg.eig."),
         ]
     )
-    agent = build_react_agent(
+    agent = build_agent_graph(
         dummy_settings,
         llm=model,
         tools=[make_fake_execute_python_tool(), make_fake_search_math_knowledge_tool()],
@@ -105,8 +96,54 @@ async def test_react_loop_routes_to_search_math_knowledge(dummy_settings) -> Non
         {"messages": [HumanMessage("How do I find eigenvalues?")]},
         config={"recursion_limit": dummy_settings.recursion_limit},
     )
-    texts = [m.content for m in result["messages"] if isinstance(m, AIMessage) and m.content]
-    assert any("linear_algebra.md" in str(t) for t in texts)
+    assert "linear_algebra.md" in str(result["messages"][-1].content)
+
+
+@pytest.mark.asyncio
+async def test_graph_verifier_sends_planner_back_with_feedback(dummy_settings) -> None:
+    """Insufficient once, then sufficient: loop-back works and the counter resets after."""
+    model = ScriptedToolModel(
+        [
+            AIMessage(content="draft one"),  # planner call 1
+            _verification_message(sufficient=False, feedback="double check the sign", call_id="v1"),
+            AIMessage(content="draft two, fixed the sign"),  # planner call 2 (after retry)
+            _verification_message(sufficient=True, call_id="v2"),
+            AIMessage(content="Final polished answer."),
+        ]
+    )
+    agent = build_agent_graph(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage("question")], "verification_attempts": 0},
+        config={"recursion_limit": dummy_settings.recursion_limit},
+    )
+    assert result["messages"][-1].content == "Final polished answer."
+    # Responder resets the counter so the next turn on this thread starts fresh.
+    assert result["verification_attempts"] == 0
+    assert any("double check the sign" in str(m.content) for m in result["messages"])
+
+
+@pytest.mark.asyncio
+async def test_graph_verifier_cap_prevents_infinite_loop(dummy_settings) -> None:
+    """Verifier stays unsatisfied forever; the attempt cap still forces termination."""
+    assert dummy_settings.verification_max_attempts == 2
+    model = ScriptedToolModel(
+        [
+            AIMessage(content="draft 1"),
+            _verification_message(sufficient=False, feedback="no", call_id="v1"),
+            AIMessage(content="draft 2"),
+            _verification_message(sufficient=False, feedback="still no", call_id="v2"),
+            AIMessage(content="draft 3"),
+            _verification_message(sufficient=False, feedback="nope", call_id="v3"),
+            AIMessage(content="Answer given despite imperfect verification."),
+        ]
+    )
+    agent = build_agent_graph(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage("question")], "verification_attempts": 0},
+        config={"recursion_limit": dummy_settings.recursion_limit},
+    )
+    assert result["messages"][-1].content == "Answer given despite imperfect verification."
+    assert result["verification_attempts"] == 0
 
 
 def test_build_llm_uses_max_tokens(dummy_settings) -> None:
@@ -120,6 +157,15 @@ def test_build_llm_uses_max_tokens(dummy_settings) -> None:
         assert kwargs["max_tokens"] == 123
 
 
+def _direct_answer_script(text: str) -> list[AIMessage]:
+    """planner (no tools) -> verifier(sufficient) -> responder, for one turn."""
+    return [
+        AIMessage(content=f"draft: {text}"),
+        _verification_message(sufficient=True),
+        AIMessage(content=text),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_checkpointer_persists_history_across_turns(dummy_settings) -> None:
     """Same thread_id: the second turn's state includes both human messages."""
@@ -127,11 +173,11 @@ async def test_checkpointer_persists_history_across_turns(dummy_settings) -> Non
 
     model = ScriptedToolModel(
         [
-            AIMessage(content="First answer."),
-            AIMessage(content="Second answer, building on the first."),
+            *_direct_answer_script("First answer."),
+            *_direct_answer_script("Second answer, building on the first."),
         ]
     )
-    agent = build_react_agent(
+    agent = build_agent_graph(
         dummy_settings,
         llm=model,
         tools=[make_fake_execute_python_tool()],
@@ -155,8 +201,10 @@ async def test_checkpointer_isolates_different_threads(dummy_settings) -> None:
     """Different thread_id: no history bleeds from one conversation into another."""
     from langgraph.checkpoint.memory import InMemorySaver
 
-    model = ScriptedToolModel([AIMessage(content="Answer.")])
-    agent = build_react_agent(
+    model = ScriptedToolModel(
+        [*_direct_answer_script("Answer."), *_direct_answer_script("Answer.")]
+    )
+    agent = build_agent_graph(
         dummy_settings,
         llm=model,
         tools=[make_fake_execute_python_tool()],
@@ -180,8 +228,8 @@ async def test_checkpointer_isolates_different_threads(dummy_settings) -> None:
 @pytest.mark.asyncio
 async def test_without_checkpointer_each_call_is_stateless(dummy_settings) -> None:
     """No checkpointer passed (default None): behavior matches pre-memory graphs."""
-    model = ScriptedToolModel([AIMessage(content="Answer.")])
-    agent = build_react_agent(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
+    model = ScriptedToolModel(_direct_answer_script("Answer."))
+    agent = build_agent_graph(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
 
     result = await agent.ainvoke(
         {"messages": [HumanMessage("Q1")]},

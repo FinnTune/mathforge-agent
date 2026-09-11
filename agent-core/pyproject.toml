@@ -14,7 +14,8 @@ description = "LangGraph + Claude math agent with sandboxed Python execution"
 # (this manifest lives in agent-core/, README.md is at the repo root).
 requires-python = ">=3.11"
 dependencies = [
-    # Agent runtime: LangGraph prebuilt ReAct + Anthropic chat model.
+    # Agent runtime: LangGraph (hand-rolled planner/tools/verifier/responder
+    # graph, see agent.py) + Anthropic chat model.
     "langgraph==1.1.8",
     "langchain-anthropic==1.4.1",
     # langchain-mcp-adapters pulls in a newer langchain-core than the previous
@@ -22,8 +23,10 @@ dependencies = [
     "langchain-core>=1.6.2,<2",
     "python-dotenv==1.2.2",
     "discord.py>=2.4,<3",
-    # MCP client: loads tools (e.g. the Rust sandbox server) as LangChain tools.
+    # MCP client: loads tools (sandbox + mathkb servers) as LangChain tools.
     "langchain-mcp-adapters==0.3.2",
+    # Persistent (SQLite-backed) LangGraph checkpointer — see checkpointer.py.
+    "langgraph-checkpoint-sqlite==3.1.1",
 ]
 
 [project.optional-dependencies]
@@ -41,15 +44,14 @@ mathforge-discord = "discord_bot:main"
 
 [tool.setuptools]
 # Flat layout: top-level modules, not a `src/` package.
-py-modules = ["agent", "config", "discord_bot", "main", "mcp_client"]
+py-modules = ["agent", "checkpointer", "config", "discord_bot", "main", "mcp_client"]
 
 [tool.pytest.ini_options]
 # pytest-asyncio: async tests without explicit loop fixtures.
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = [
-    # LangGraph deprecations / upstream noise during test runs.
-    "ignore:create_react_agent has been moved:DeprecationWarning",
+    # Upstream noise during test runs.
     "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
 ]
 
