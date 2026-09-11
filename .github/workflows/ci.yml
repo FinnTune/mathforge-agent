@@ -23,9 +23,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Editable install pulls runtime + dev deps from pyproject.toml.
+      # Editable install pulls runtime + dev deps (incl. grpcio-tools) from pyproject.toml.
       - name: Install
         run: pip install -e ".[dev]"
+      # Generated stubs are gitignored — regenerate before lint/test, same as
+      # the Rust sandbox binary is built before its own tests below.
+      - name: Generate protobuf/gRPC stubs
+        run: bash ../scripts/generate_proto.sh
       - name: Ruff
         run: ruff check .
       - name: Pytest

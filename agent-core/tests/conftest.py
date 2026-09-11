@@ -31,4 +31,6 @@ def dummy_settings(tmp_path) -> Settings:
         voyage_model="voyage-3-lite",
         checkpoint_db_path=str(tmp_path / "checkpoints.sqlite3"),
         verification_max_attempts=2,
+        grpc_host="127.0.0.1",
+        grpc_port=50051,
     )

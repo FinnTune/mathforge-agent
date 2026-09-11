@@ -37,6 +37,8 @@ def _settings_with_db(db_path: Path) -> Settings:
         voyage_model="voyage-3-lite",
         checkpoint_db_path=str(db_path),
         verification_max_attempts=2,
+        grpc_host="127.0.0.1",
+        grpc_port=50051,
     )
 
 

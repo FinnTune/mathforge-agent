@@ -1,18 +1,33 @@
 """Tests for Discord bot helper logic.
 
 These tests intentionally avoid network/API calls and focus on deterministic
-helpers used by the slash-command path.
+helpers used by the slash-command path. ``run_query`` is tested against a
+fake gRPC stub (see ``tests/test_main.py``'s docstring for the same pattern)
+— the real proto/transport wiring has its own coverage in
+``test_grpc_server.py``'s loopback test.
 """
 
 from __future__ import annotations
 
+import pytest
+
+import chat_pb2
 from discord_bot import (
     chunk_text,
-    coerce_content_to_text,
     is_channel_allowed,
     parse_allowed_channel_ids,
+    run_query,
     thread_key,
 )
+
+
+class _FakeStub:
+    def __init__(self, events) -> None:
+        self._events = events
+
+    async def Chat(self, request):
+        for event in self._events:
+            yield event
 
 
 def test_parse_allowed_channel_ids_empty() -> None:
@@ -44,13 +59,29 @@ def test_chunk_text_splits_and_handles_empty() -> None:
     assert parts == ["ab", "cd", "ef"]
 
 
-def test_coerce_content_to_text_variants() -> None:
-    assert coerce_content_to_text("hello") == "hello"
-    assert coerce_content_to_text(["a", "b"]) == "ab"
-    assert (
-        coerce_content_to_text([{"type": "text", "text": "hi"}, {"type": "x", "text": "skip"}])
-        == "hi"
+@pytest.mark.asyncio
+async def test_run_query_concatenates_text_deltas() -> None:
+    stub = _FakeStub(
+        [
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="Full ")),
+            chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text="reply")),
+            chat_pb2.ChatEvent(done=chat_pb2.Done()),
+        ]
     )
+    assert await run_query(stub, "q", "t1") == "Full reply"
+
+
+@pytest.mark.asyncio
+async def test_run_query_defaults_empty_reply_to_placeholder() -> None:
+    stub = _FakeStub([chat_pb2.ChatEvent(done=chat_pb2.Done())])
+    assert await run_query(stub, "q", "t1") == "(empty response)"
+
+
+@pytest.mark.asyncio
+async def test_run_query_raises_on_error_event() -> None:
+    stub = _FakeStub([chat_pb2.ChatEvent(error=chat_pb2.Error(message="boom"))])
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_query(stub, "q", "t1")
 
 
 def test_thread_key_scopes_by_channel_user_and_generation() -> None:

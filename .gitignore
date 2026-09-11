@@ -28,6 +28,11 @@ wheels/
 # Rust
 target/
 
+# Generated protobuf/gRPC stubs (scripts/generate_proto.sh)
+*_pb2.py
+*_pb2_grpc.py
+*_pb2.pyi
+
 # Output folders
 plots/
 .matplotlib/

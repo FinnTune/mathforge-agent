@@ -1,22 +1,31 @@
 # MathForge — LangGraph + Claude math and code agent
 
-An agent built with **LangGraph** and **Claude (Anthropic)** using a hand-rolled planner → tools → verifier → responder graph (not just a prebuilt ReAct loop — see [Agent design](#agent-design)). It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, self-checking its own work before answering, and remembering conversations across restarts.
+An agent built with **LangGraph** and **Claude (Anthropic)** using a hand-rolled planner → tools → verifier → responder graph (not just a prebuilt ReAct loop — see [Agent design](#agent-design)), served over **gRPC** (see [gRPC service](#grpc-service)) so the CLI and Discord bot are thin clients of one long-running server. It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, self-checking its own work before answering, and remembering conversations across restarts.
 
 ## Architecture
 
 MathForge is a polyglot monorepo, one directory per component:
 
 ```
-agent-core/          Python — LangGraph agent (see "Agent design"), CLI, Discord bot
+agent-core/          Python — LangGraph agent (see "Agent design"); one gRPC
+                      server (grpc_server.py) + two thin clients (CLI, Discord)
 mcp-servers/
   sandbox-rs/         Rust MCP server — executes model-generated Python in a
                        resource-limited subprocess (the trust boundary)
   mathkb-py/          Python MCP server — search_math_knowledge, retrieval
                        over a Qdrant-backed corpus of reference notes
+proto/chat.proto      gRPC service definition (agent-core's server + clients;
+                       future Rust gateway would generate tonic stubs from it too)
 docker-compose.yml    Qdrant (vector store behind mathkb-py)
 ```
 
-`agent-core` talks to both `sandbox-rs` and `mathkb-py` as an **MCP client** (`langchain-mcp-adapters`), over stdio — the same transport pattern Claude Desktop uses to run local MCP servers. This is in-progress toward a larger rearchitecture (a gRPC service layer is next); see commit history for what's landed.
+Within `agent-core`, `grpc_server.py` builds the agent graph once (loading
+the MCP tools, opening the checkpointer) and serves it over gRPC
+(`proto/chat.proto`); `main.py` (CLI) and `discord_bot.py` are thin clients
+that just call the streaming `Chat` RPC — see [gRPC service](#grpc-service).
+`agent-core` itself talks to `sandbox-rs` and `mathkb-py` as an **MCP
+client** (`langchain-mcp-adapters`), over stdio — the same transport pattern
+Claude Desktop uses to run local MCP servers.
 
 ## Security model
 
@@ -42,9 +51,10 @@ python3 -m venv mcp-servers/mathkb-py/.venv
 mcp-servers/mathkb-py/.venv/bin/pip install -e mcp-servers/mathkb-py
 docker compose up -d qdrant
 
-# 3. Set up agent-core (Python)
+# 3. Set up agent-core (Python) and generate the gRPC stubs from proto/chat.proto
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e "./agent-core[dev]"
+bash scripts/generate_proto.sh
 cp .env.example .env
 # Set ANTHROPIC_API_KEY and VOYAGE_API_KEY in .env, and point MATHFORGE_SANDBOX_PYTHON
 # at the venv from step 1:
@@ -54,7 +64,8 @@ cp .env.example .env
 set -a && source .env && set +a
 mcp-servers/mathkb-py/.venv/bin/python mcp-servers/mathkb-py/ingest.py
 
-python agent-core/main.py
+# 5. Start the gRPC server (keep this running in its own terminal)
+mathforge-server
 ```
 
 Steps 2 and 4 (the RAG server/knowledge base) are optional — without them the
@@ -62,13 +73,20 @@ Steps 2 and 4 (the RAG server/knowledge base) are optional — without them the
 credentials/connection error, and the agent gracefully falls back to
 answering from `execute_python` alone (see [RAG knowledge base](#rag-knowledge-base)).
 
+With the server running, in a **second terminal** (same venv):
+
+```bash
+source .venv/bin/activate
+python agent-core/main.py
+```
+
 CLI options:
 
 - `python agent-core/main.py` — stream the assistant reply to the terminal.
 - `python agent-core/main.py --no-stream` — wait for the full reply (easier for scripting).
-- `python agent-core/main.py --verbose` — print tool outputs (including executed code results).
+- `python agent-core/main.py --verbose` — print tool calls/outputs as the agent works.
 
-You can also run `mathforge` if the venv's `bin` is on your `PATH` (console script from `agent-core/pyproject.toml`).
+You can also run `mathforge` (and `mathforge-server`) if the venv's `bin` is on your `PATH` (console scripts from `agent-core/pyproject.toml`). If the server isn't reachable, the CLI says so immediately (`Could not reach MathForge gRPC server at ... Is mathforge-server running?`) rather than failing on the first query.
 
 ### Conversation memory
 
@@ -127,6 +145,35 @@ START → planner ⇄ tools           planner reasons and calls execute_python /
 
 This means a single user turn can involve multiple Claude calls (planner → tools → planner → verifier → \[planner again, if the verifier pushed back] → responder) before you see a reply — run with `--verbose` to watch each step.
 
+## gRPC service
+
+`proto/chat.proto` defines `MathForgeChat`: a streaming `Chat` RPC (one
+query in, a stream of `ChatEvent`s back — `text_delta`, `tool_call`,
+`tool_result`, `done`, `error`) plus a `HealthCheck` unary RPC. `grpc_server.py`
+builds the agent graph **once** at startup (MCP tools, checkpointer, the
+compiled graph) and serves many client requests against that same instance —
+`main.py` and `discord_bot.py` no longer each build their own; they're thin
+clients that call `Chat` and print/concatenate `text_delta` events.
+
+- Only `text_delta` events carry the responder node's user-facing text — the
+  server applies the same `langgraph_node` filtering that used to live in
+  `main.py` (see [Agent design](#agent-design)) before this phase, so
+  planner/verifier internals never reach a client.
+- `tool_call`/`tool_result` events (planner's real tool calls only — the
+  verifier's forced `VerificationDecision` call is internal plumbing and
+  never surfaced) print under `--verbose` in the CLI.
+- "Reset" is purely client-side — there's no `ResetThread` RPC. Clients just
+  start sending a new `thread_id`; the old thread's history simply stays
+  unreferenced in the server's SQLite DB, same as before this phase.
+- **Plaintext, no auth** (`insecure_channel`/`insecure_port`) — consistent
+  with the project's existing local-only posture (no TLS on Qdrant, no auth
+  on the MCP stdio servers). Real auth/TLS is natural scope for a Phase 5
+  Rust gateway in front of this server, not implemented yet.
+
+Regenerate stubs after editing the proto: `bash scripts/generate_proto.sh`
+(generated `agent-core/chat_pb2*.py` are gitignored — same "build step
+required" precedent as the Rust sandbox binary and the mathkb venv).
+
 ## RAG knowledge base
 
 `mcp-servers/mathkb-py` is a second MCP server exposing one tool,
@@ -165,6 +212,8 @@ See `.env.example`. Notable variables:
 | `QDRANT_COLLECTION` | Qdrant collection name (default `mathforge-math-notes`). |
 | `MATHFORGE_MATHKB_MCP_PYTHON` | Interpreter for the mathkb MCP server. |
 | `MATHFORGE_MATHKB_MCP_SCRIPT` | Path to `mcp-servers/mathkb-py/server.py`. |
+| `MATHFORGE_GRPC_HOST` / `MATHFORGE_GRPC_PORT` | Server bind address (default `127.0.0.1:50051`). |
+| `MATHFORGE_GRPC_TARGET` | **Client-only** (`main.py`/`discord_bot.py`): server address to connect to. |
 | `MATHFORGE_LOG_LEVEL` | `logging` level for the app. |
 | `DISCORD_BOT_TOKEN` | Required only for `mathforge-discord`. |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | Optional comma-separated channel allowlist. |
@@ -176,12 +225,13 @@ Optional **LangSmith** tracing: set `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`,
 
 ## Discord integration
 
-MathForge can run as a Discord slash-command bot using the same agent and sandbox.
+MathForge can run as a Discord slash-command bot — another thin gRPC client
+of the same `mathforge-server`, which must already be running.
 
 1. Create a Discord app/bot in the Discord Developer Portal.
 2. Copy the bot token to `.env` as `DISCORD_BOT_TOKEN=...`.
 3. Invite the bot with scopes `bot` and `applications.commands`.
-4. Run:
+4. With `mathforge-server` running (see Quick Start), run:
 
 ```bash
 mathforge-discord
@@ -211,7 +261,8 @@ Recommended safety settings in `.env`:
 ## Development
 
 ```bash
-# agent-core (Python)
+# agent-core (Python) — regenerate gRPC stubs first (gitignored, see above)
+bash scripts/generate_proto.sh
 cd agent-core
 ruff check .
 ANTHROPIC_API_KEY=dummy-for-ci pytest -q
@@ -229,11 +280,11 @@ ruff check .
 pytest -q
 ```
 
-CI runs three jobs: Ruff + pytest on Python 3.11–3.13 for both `agent-core` and `mathkb-py`, and `cargo clippy`/`cargo test` for `sandbox-rs`.
+CI runs three jobs: Ruff + pytest on Python 3.11–3.13 for both `agent-core` (after regenerating gRPC stubs) and `mathkb-py`, and `cargo clippy`/`cargo test` for `sandbox-rs`.
 
 ## Requirements
 
-Python **3.11+** for `agent-core` and `mcp-servers/mathkb-py`, Rust (stable) for `mcp-servers/sandbox-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at, and Docker (for Qdrant) if you want the RAG knowledge base live. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` + `requirements.txt`, `mcp-servers/mathkb-py/pyproject.toml`).
+Python **3.11+** for `agent-core` and `mcp-servers/mathkb-py`, Rust (stable) for `mcp-servers/sandbox-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at, and Docker (for Qdrant) if you want the RAG knowledge base live. `protoc` codegen (`grpcio-tools`) comes from `agent-core`'s `dev` extra — no separate `protoc` binary install needed. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` + `requirements.txt`, `mcp-servers/mathkb-py/pyproject.toml`).
 
 ## License
 
