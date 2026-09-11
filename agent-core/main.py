@@ -16,6 +16,13 @@ Flow:
 4. ``reset`` just starts a new ``thread_id`` client-side — the server needs
    no request for that, conversation memory for the old thread simply stays
    unreferenced in its SQLite DB.
+
+If ``MATHFORGE_GRPC_TARGET`` points at the optional Rust gateway
+(``gateway-rs``, in front of ``grpc_server.py``) rather than the server
+directly, set ``MATHFORGE_GRPC_API_KEY`` too — the gateway requires
+``x-api-key`` metadata on ``Chat`` calls. Talking directly to the server (the
+default), this is unset and no metadata is sent; the server doesn't look for
+it either way.
 """
 
 from __future__ import annotations
@@ -34,6 +41,16 @@ import chat_pb2
 import chat_pb2_grpc
 
 HEALTH_CHECK_TIMEOUT_SEC = 5.0
+
+
+def grpc_metadata() -> tuple[tuple[str, str], ...]:
+    """Metadata attached to gRPC calls — only meaningful when talking through
+    the optional Rust gateway (``gateway-rs``), which requires ``x-api-key``.
+    Talking directly to ``grpc_server.py`` (the default), this is empty and
+    the server simply ignores metadata it doesn't look at.
+    """
+    key = os.getenv("MATHFORGE_GRPC_API_KEY", "").strip()
+    return (("x-api-key", key),) if key else ()
 
 
 def _configure_logging() -> None:
@@ -61,7 +78,8 @@ async def check_server_health(stub: chat_pb2_grpc.MathForgeChatStub) -> str | No
     """Return the server's reported model name, or ``None`` if unreachable."""
     try:
         response = await asyncio.wait_for(
-            stub.HealthCheck(chat_pb2.HealthCheckRequest()), timeout=HEALTH_CHECK_TIMEOUT_SEC
+            stub.HealthCheck(chat_pb2.HealthCheckRequest(), metadata=grpc_metadata()),
+            timeout=HEALTH_CHECK_TIMEOUT_SEC,
         )
     except (grpc.aio.AioRpcError, TimeoutError):
         return None
@@ -83,7 +101,7 @@ async def run_turn(
         print("MathForge: ", end="", flush=True)
 
     try:
-        async for event in stub.Chat(request):
+        async for event in stub.Chat(request, metadata=grpc_metadata()):
             kind = event.WhichOneof("event")
             if kind == "text_delta":
                 if stream:

@@ -1,6 +1,6 @@
 # MathForge — LangGraph + Claude math and code agent
 
-An agent built with **LangGraph** and **Claude (Anthropic)** using a hand-rolled planner → tools → verifier → responder graph (not just a prebuilt ReAct loop — see [Agent design](#agent-design)), served over **gRPC** (see [gRPC service](#grpc-service)) so the CLI and Discord bot are thin clients of one long-running server. It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, self-checking its own work before answering, and remembering conversations across restarts.
+An agent built with **LangGraph** and **Claude (Anthropic)** using a hand-rolled planner → tools → verifier → responder graph (not just a prebuilt ReAct loop — see [Agent design](#agent-design)), served over **gRPC** (see [gRPC service](#grpc-service)) so the CLI and Discord bot are thin clients of one long-running server, optionally fronted by a **Rust gRPC gateway** for auth and rate limiting (see [Rust gRPC gateway](#rust-grpc-gateway)). It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, self-checking its own work before answering, and remembering conversations across restarts.
 
 ## Architecture
 
@@ -14,8 +14,10 @@ mcp-servers/
                        resource-limited subprocess (the trust boundary)
   mathkb-py/          Python MCP server — search_math_knowledge, retrieval
                        over a Qdrant-backed corpus of reference notes
-proto/chat.proto      gRPC service definition (agent-core's server + clients;
-                       future Rust gateway would generate tonic stubs from it too)
+proto/chat.proto      gRPC service definition — agent-core's server + clients
+                       AND gateway-rs generate their stubs from this one file
+gateway-rs/           Rust gRPC gateway (tonic) — optional auth + rate
+                       limiting in front of grpc_server.py (see below)
 docker-compose.yml    Qdrant (vector store behind mathkb-py)
 ```
 
@@ -25,7 +27,10 @@ the MCP tools, opening the checkpointer) and serves it over gRPC
 that just call the streaming `Chat` RPC — see [gRPC service](#grpc-service).
 `agent-core` itself talks to `sandbox-rs` and `mathkb-py` as an **MCP
 client** (`langchain-mcp-adapters`), over stdio — the same transport pattern
-Claude Desktop uses to run local MCP servers.
+Claude Desktop uses to run local MCP servers. `gateway-rs` sits in front of
+`grpc_server.py`, speaking the identical `MathForgeChat` service and
+forwarding to it — clients don't need to know which one they're talking to,
+see [Rust gRPC gateway](#rust-grpc-gateway).
 
 ## Security model
 
@@ -165,14 +170,52 @@ clients that call `Chat` and print/concatenate `text_delta` events.
 - "Reset" is purely client-side — there's no `ResetThread` RPC. Clients just
   start sending a new `thread_id`; the old thread's history simply stays
   unreferenced in the server's SQLite DB, same as before this phase.
-- **Plaintext, no auth** (`insecure_channel`/`insecure_port`) — consistent
-  with the project's existing local-only posture (no TLS on Qdrant, no auth
-  on the MCP stdio servers). Real auth/TLS is natural scope for a Phase 5
-  Rust gateway in front of this server, not implemented yet.
+- **Plaintext, no auth on the server itself** (`insecure_channel`/`insecure_port`)
+  — consistent with the project's existing local-only posture (no TLS on
+  Qdrant, no auth on the MCP stdio servers). Auth and rate limiting are
+  handled by the optional `gateway-rs` in front of it, not the server —
+  see [Rust gRPC gateway](#rust-grpc-gateway). Transport is still plaintext
+  either way; TLS isn't implemented.
 
 Regenerate stubs after editing the proto: `bash scripts/generate_proto.sh`
 (generated `agent-core/chat_pb2*.py` are gitignored — same "build step
 required" precedent as the Rust sandbox binary and the mathkb venv).
+`gateway-rs` generates its own stubs from the same file at `cargo build`
+time (`build.rs`), no separate step needed.
+
+## Rust gRPC gateway
+
+`gateway-rs` is an optional `tonic` (Rust) gRPC gateway that implements the
+*same* `MathForgeChat` service as `grpc_server.py` and transparently forwards
+every call to it — but requires an API key and enforces a per-key rate limit
+first. It's the systems-level counterpart to `mcp-servers/sandbox-rs`: auth
+and rate limiting live here in Rust, agent orchestration stays in Python.
+
+- **Auth:** `Chat` calls need `x-api-key` metadata matching one of
+  `MATHFORGE_GATEWAY_API_KEYS` (comma-separated) — missing/invalid key →
+  `UNAUTHENTICATED`, the upstream server is never even called.
+  `MATHFORGE_GATEWAY_API_KEYS` is **required**; the gateway refuses to start
+  without it (fail-closed — an auth gateway that's insecure by default would
+  defeat the point). `HealthCheck` is deliberately left unauthenticated so a
+  probe/load-balancer can check the gateway itself is up without a key.
+- **Rate limiting:** per-API-key quota (`governor`), `MATHFORGE_GATEWAY_RATE_LIMIT_PER_MINUTE`
+  (default 30) — checked *after* auth, so unauthenticated traffic can't burn
+  a legitimate key's budget. Exceeding it → `RESOURCE_EXHAUSTED`.
+- **Using it:** run `mathforge-gateway` (in `gateway-rs/`) alongside
+  `mathforge-server`, pointed at it via `MATHFORGE_GATEWAY_UPSTREAM` (default
+  `http://127.0.0.1:50051`). Then point clients at the gateway instead of the
+  server: `MATHFORGE_GRPC_TARGET=127.0.0.1:50052` and
+  `MATHFORGE_GRPC_API_KEY=<one of the configured keys>`. This is entirely
+  optional — talking directly to `grpc_server.py` (the Quick Start default,
+  `MATHFORGE_GRPC_API_KEY` unset) works exactly as in the no-gateway setup.
+- **Plaintext, no TLS** — same documented limitation as the server itself;
+  this adds auth and rate limiting, not transport encryption.
+
+```bash
+cd gateway-rs
+cargo build --release
+MATHFORGE_GATEWAY_API_KEYS=some-secret-key ./target/release/mathforge-gateway
+```
 
 ## RAG knowledge base
 
@@ -213,7 +256,12 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_MATHKB_MCP_PYTHON` | Interpreter for the mathkb MCP server. |
 | `MATHFORGE_MATHKB_MCP_SCRIPT` | Path to `mcp-servers/mathkb-py/server.py`. |
 | `MATHFORGE_GRPC_HOST` / `MATHFORGE_GRPC_PORT` | Server bind address (default `127.0.0.1:50051`). |
-| `MATHFORGE_GRPC_TARGET` | **Client-only** (`main.py`/`discord_bot.py`): server address to connect to. |
+| `MATHFORGE_GRPC_TARGET` | **Client-only**: server (or gateway) address to connect to. |
+| `MATHFORGE_GRPC_API_KEY` | **Client-only**: required if `MATHFORGE_GRPC_TARGET` points at the gateway. |
+| `MATHFORGE_GATEWAY_HOST` / `MATHFORGE_GATEWAY_PORT` | Gateway bind address (default `127.0.0.1:50052`). |
+| `MATHFORGE_GATEWAY_UPSTREAM` | Server address the gateway forwards to (default `http://127.0.0.1:50051`). |
+| `MATHFORGE_GATEWAY_API_KEYS` | **Required to start the gateway** — comma-separated allowed keys. |
+| `MATHFORGE_GATEWAY_RATE_LIMIT_PER_MINUTE` | Per-API-key quota before `RESOURCE_EXHAUSTED` (default 30). |
 | `MATHFORGE_LOG_LEVEL` | `logging` level for the app. |
 | `DISCORD_BOT_TOKEN` | Required only for `mathforge-discord`. |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | Optional comma-separated channel allowlist. |
@@ -278,13 +326,19 @@ MATHFORGE_SANDBOX_PYTHON=/path/to/venv/bin/python cargo test
 cd mcp-servers/mathkb-py
 ruff check .
 pytest -q
+
+# gateway-rs (Rust) — no Python/Docker needed, tests use a fake in-process
+# upstream server (pure Rust); build.rs regenerates its own proto stubs
+cd gateway-rs
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-CI runs three jobs: Ruff + pytest on Python 3.11–3.13 for both `agent-core` (after regenerating gRPC stubs) and `mathkb-py`, and `cargo clippy`/`cargo test` for `sandbox-rs`.
+CI runs four jobs: Ruff + pytest on Python 3.11–3.13 for both `agent-core` (after regenerating gRPC stubs) and `mathkb-py`, and `cargo clippy`/`cargo test` for both `sandbox-rs` and `gateway-rs`.
 
 ## Requirements
 
-Python **3.11+** for `agent-core` and `mcp-servers/mathkb-py`, Rust (stable) for `mcp-servers/sandbox-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at, and Docker (for Qdrant) if you want the RAG knowledge base live. `protoc` codegen (`grpcio-tools`) comes from `agent-core`'s `dev` extra — no separate `protoc` binary install needed. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` + `requirements.txt`, `mcp-servers/mathkb-py/pyproject.toml`).
+Python **3.11+** for `agent-core` and `mcp-servers/mathkb-py`, Rust (stable) for `mcp-servers/sandbox-rs` and `gateway-rs`, plus a separate Python 3 with NumPy/SciPy/SymPy/Matplotlib for whatever `MATHFORGE_SANDBOX_PYTHON` points at, and Docker (for Qdrant) if you want the RAG knowledge base live. `protoc` codegen (`grpcio-tools` for Python, `tonic-prost-build` for `gateway-rs`) comes from each component's own manifest — no separate `protoc` binary install needed. Dependencies are declared in each component's own manifest (`agent-core/pyproject.toml`, `mcp-servers/sandbox-rs/Cargo.toml` + `requirements.txt`, `mcp-servers/mathkb-py/pyproject.toml`, `gateway-rs/Cargo.toml`).
 
 ## License
 

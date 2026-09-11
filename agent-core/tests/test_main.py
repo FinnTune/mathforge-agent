@@ -15,7 +15,7 @@ import pytest
 
 import chat_pb2
 import main as main_module
-from main import async_main, check_server_health, run_turn
+from main import async_main, check_server_health, grpc_metadata, run_turn
 
 
 class _FakeStub:
@@ -26,13 +26,16 @@ class _FakeStub:
         self._health_response = health_response
         self._health_raises = health_raises
         self.requests: list[chat_pb2.ChatRequest] = []
+        self.metadata_seen: list[tuple] = []
 
-    async def Chat(self, request):
+    async def Chat(self, request, metadata=()):
         self.requests.append(request)
+        self.metadata_seen.append(metadata)
         for event in self._events:
             yield event
 
-    async def HealthCheck(self, request):
+    async def HealthCheck(self, request, metadata=()):
+        self.metadata_seen.append(metadata)
         if self._health_raises is not None:
             raise self._health_raises
         return self._health_response
@@ -46,6 +49,24 @@ class _FakeChannel:
 
     async def __aexit__(self, *exc_info):
         return False
+
+
+def test_grpc_metadata_empty_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MATHFORGE_GRPC_API_KEY", raising=False)
+    assert grpc_metadata() == ()
+
+
+def test_grpc_metadata_includes_api_key_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MATHFORGE_GRPC_API_KEY", "secret-key")
+    assert grpc_metadata() == (("x-api-key", "secret-key"),)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_attaches_api_key_metadata_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MATHFORGE_GRPC_API_KEY", "secret-key")
+    stub = _FakeStub(events=[chat_pb2.ChatEvent(done=chat_pb2.Done())])
+    await run_turn(stub, "q", thread_id="t1", stream=True, verbose=False)
+    assert stub.metadata_seen[0] == (("x-api-key", "secret-key"),)
 
 
 @pytest.mark.asyncio

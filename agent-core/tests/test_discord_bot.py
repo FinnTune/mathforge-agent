@@ -25,7 +25,7 @@ class _FakeStub:
     def __init__(self, events) -> None:
         self._events = events
 
-    async def Chat(self, request):
+    async def Chat(self, request, metadata=()):
         for event in self._events:
             yield event
 

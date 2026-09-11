@@ -66,6 +66,26 @@ jobs:
           MATHFORGE_SANDBOX_PYTHON: ${{ github.workspace }}/mcp-servers/sandbox-rs/.venv-sandbox-test/bin/python
         run: cargo test
 
+  gateway-rs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway-rs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway-rs
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      # No Python/Docker dependency — the fake upstream in tests/ is pure Rust.
+      - name: Test
+        run: cargo test
+
   mathkb-py:
     runs-on: ubuntu-latest
     defaults:
