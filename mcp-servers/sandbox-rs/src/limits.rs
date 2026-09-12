@@ -12,8 +12,9 @@
 //! already running other work (routine here: 90+ processes under a normal
 //! dev/CI user), a low value fails almost every `pthread_create` immediately
 //! (numpy/matplotlib spawn threads on import) and a high value stops
-//! stopping anything. A correct per-subtree fork-bomb guard needs a cgroup
-//! with `pids.max`, which is real future work, not a `setrlimit` call.
+//! stopping anything. The actual per-subtree fork-bomb guard is `cgroup.rs`'s
+//! `pids.max`, applied separately in `runner.rs` (opportunistically — it
+//! needs a delegated cgroup v2 subtree, not guaranteed everywhere).
 
 use rlimit::Resource;
 use std::io;
