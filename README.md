@@ -171,12 +171,10 @@ clients that call `Chat` and print/concatenate `text_delta` events.
 - "Reset" is purely client-side — there's no `ResetThread` RPC. Clients just
   start sending a new `thread_id`; the old thread's history simply stays
   unreferenced in the server's SQLite DB, same as before this phase.
-- **Plaintext, no auth on the server itself** (`insecure_channel`/`insecure_port`)
-  — consistent with the project's existing local-only posture (no TLS on
-  Qdrant, no auth on the MCP stdio servers). Auth and rate limiting are
-  handled by the optional `gateway-rs` in front of it, not the server —
-  see [Rust gRPC gateway](#rust-grpc-gateway). Transport is still plaintext
-  either way; TLS isn't implemented.
+- **No auth on the server itself** — that's handled by the optional
+  `gateway-rs` in front of it, not the server; see
+  [Rust gRPC gateway](#rust-grpc-gateway).
+- **Plaintext by default, TLS opt-in** — see [TLS](#tls) below.
 
 Regenerate stubs after editing the proto: `bash scripts/generate_proto.sh`
 (generated `agent-core/chat_pb2*.py` are gitignored — same "build step
@@ -209,13 +207,56 @@ and rate limiting live here in Rust, agent orchestration stays in Python.
   `MATHFORGE_GRPC_API_KEY=<one of the configured keys>`. This is entirely
   optional — talking directly to `grpc_server.py` (the Quick Start default,
   `MATHFORGE_GRPC_API_KEY` unset) works exactly as in the no-gateway setup.
-- **Plaintext, no TLS** — same documented limitation as the server itself;
-  this adds auth and rate limiting, not transport encryption.
+- **TLS is opt-in, on both connection surfaces independently** — see
+  [TLS](#tls) below.
 
 ```bash
 cd gateway-rs
 cargo build --release
 MATHFORGE_GATEWAY_API_KEYS=some-secret-key ./target/release/mathforge-gateway
+```
+
+## TLS
+
+Every gRPC hop (`grpc_server.py`'s listening port, `gateway-rs`'s listening
+port, `gateway-rs`'s connection to `grpc_server.py`, and every client) is
+plaintext by default — unchanged from before this feature — and switches to
+TLS independently per hop, based purely on whether that hop's env vars are
+set. Generate a throwaway self-signed dev cert (covers `localhost`/
+`127.0.0.1`, **not** a real CA — local/dev demonstration only):
+
+```bash
+./scripts/generate_dev_certs.sh   # writes certs/server.crt, certs/server.key (gitignored)
+```
+
+- **`grpc_server.py`:** set `MATHFORGE_GRPC_TLS_CERT`/`MATHFORGE_GRPC_TLS_KEY`
+  (both required together) to serve TLS instead of plaintext.
+- **Clients** (`main.py`/`discord_bot.py`, talking to either the server or
+  the gateway): set `MATHFORGE_GRPC_TLS_CA` to the CA/cert PEM to trust.
+- **`gateway-rs`'s listening side** (what clients connect to): set
+  `MATHFORGE_GATEWAY_TLS_CERT`/`MATHFORGE_GATEWAY_TLS_KEY` (both required
+  together).
+- **`gateway-rs`'s upstream side** (gateway → `grpc_server.py`): set
+  `MATHFORGE_GATEWAY_UPSTREAM_TLS_CA` to the CA/cert PEM to trust, **and**
+  change `MATHFORGE_GATEWAY_UPSTREAM` to an `https://` URL — `tonic` only
+  performs the TLS handshake for an `https://` endpoint; an `http://`
+  endpoint with a CA configured would silently stay plaintext instead of
+  failing loudly, so the gateway refuses to start in that combination.
+
+Example: TLS on every hop, using the one generated dev cert everywhere
+(a real deployment would use distinct certs per hop):
+
+```bash
+MATHFORGE_GRPC_TLS_CERT=certs/server.crt MATHFORGE_GRPC_TLS_KEY=certs/server.key mathforge-server
+
+MATHFORGE_GATEWAY_UPSTREAM=https://127.0.0.1:50051 \
+MATHFORGE_GATEWAY_UPSTREAM_TLS_CA=certs/server.crt \
+MATHFORGE_GATEWAY_TLS_CERT=certs/server.crt MATHFORGE_GATEWAY_TLS_KEY=certs/server.key \
+MATHFORGE_GATEWAY_API_KEYS=some-secret-key \
+  ./gateway-rs/target/release/mathforge-gateway
+
+MATHFORGE_GRPC_TARGET=127.0.0.1:50052 MATHFORGE_GRPC_API_KEY=some-secret-key \
+MATHFORGE_GRPC_TLS_CA=certs/server.crt mathforge
 ```
 
 ## RAG knowledge base

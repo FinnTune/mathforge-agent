@@ -40,6 +40,9 @@ dev = [
     "ruff>=0.8",
     # protoc codegen only — not needed at runtime, see scripts/generate_proto.sh.
     "grpcio-tools==1.83.1",
+    # Generates throwaway self-signed certs in TLS tests (test_grpc_server.py) —
+    # explicit dev dep rather than relying on it being present transitively.
+    "cryptography>=43",
 ]
 
 [project.scripts]

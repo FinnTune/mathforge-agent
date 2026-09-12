@@ -92,6 +92,10 @@ class Settings:
     # directly (see main.py/discord_bot.py) rather than this Settings dataclass.
     grpc_host: str
     grpc_port: int
+    # TLS identity for grpc_server.py's listening port. Both unset (the
+    # default) means plaintext, matching today's behavior.
+    tls_cert_path: str | None
+    tls_key_path: str | None
 
 
 def load_settings() -> Settings:
@@ -131,4 +135,6 @@ def load_settings() -> Settings:
         verification_max_attempts=_env_int("MATHFORGE_VERIFICATION_MAX_ATTEMPTS", 2),
         grpc_host=os.getenv("MATHFORGE_GRPC_HOST", "127.0.0.1"),
         grpc_port=_env_int("MATHFORGE_GRPC_PORT", 50051),
+        tls_cert_path=os.getenv("MATHFORGE_GRPC_TLS_CERT") or None,
+        tls_key_path=os.getenv("MATHFORGE_GRPC_TLS_KEY") or None,
     )

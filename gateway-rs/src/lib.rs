@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod gateway;
+pub mod tls;
 
 pub mod pb {
     tonic::include_proto!("mathforge");

@@ -39,6 +39,8 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MATHFORGE_VERIFICATION_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("MATHFORGE_GRPC_HOST", "0.0.0.0")
     monkeypatch.setenv("MATHFORGE_GRPC_PORT", "9999")
+    monkeypatch.setenv("MATHFORGE_GRPC_TLS_CERT", "/opt/mathforge/certs/server.crt")
+    monkeypatch.setenv("MATHFORGE_GRPC_TLS_KEY", "/opt/mathforge/certs/server.key")
 
     s = load_settings()
     assert s.anthropic_api_key == "sk-test"
@@ -62,6 +64,8 @@ def test_load_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.verification_max_attempts == 5
     assert s.grpc_host == "0.0.0.0"
     assert s.grpc_port == 9999
+    assert s.tls_cert_path == "/opt/mathforge/certs/server.crt"
+    assert s.tls_key_path == "/opt/mathforge/certs/server.key"
 
 
 def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,6 +85,8 @@ def test_load_settings_defaults_sandbox_mcp_bin_into_repo(monkeypatch: pytest.Mo
     assert s.verification_max_attempts == 2
     assert s.grpc_host == "127.0.0.1"
     assert s.grpc_port == 50051
+    assert s.tls_cert_path is None
+    assert s.tls_key_path is None
 
 
 def test_settings_dataclass_instantiation() -> None:
@@ -107,6 +113,8 @@ def test_settings_dataclass_instantiation() -> None:
         verification_max_attempts=2,
         grpc_host="127.0.0.1",
         grpc_port=50051,
+        tls_cert_path=None,
+        tls_key_path=None,
     )
     assert s.max_tokens == 100
 

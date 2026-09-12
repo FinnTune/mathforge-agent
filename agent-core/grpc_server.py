@@ -16,6 +16,7 @@ import json
 import logging
 import signal
 import sys
+from pathlib import Path
 
 import grpc
 from dotenv import load_dotenv
@@ -185,9 +186,16 @@ async def serve() -> int:
             MathForgeChatServicer(agent, settings), server
         )
         target = f"{settings.grpc_host}:{settings.grpc_port}"
-        server.add_insecure_port(target)
+        if settings.tls_cert_path and settings.tls_key_path:
+            cert_bytes = Path(settings.tls_cert_path).read_bytes()
+            key_bytes = Path(settings.tls_key_path).read_bytes()
+            credentials = grpc.ssl_server_credentials([(key_bytes, cert_bytes)])
+            server.add_secure_port(target, credentials)
+            logger.info("MathForge gRPC server listening on %s (TLS)", target)
+        else:
+            server.add_insecure_port(target)
+            logger.info("MathForge gRPC server listening on %s (plaintext)", target)
         await server.start()
-        logger.info("MathForge gRPC server listening on %s", target)
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()

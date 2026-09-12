@@ -23,6 +23,13 @@ directly, set ``MATHFORGE_GRPC_API_KEY`` too — the gateway requires
 ``x-api-key`` metadata on ``Chat`` calls. Talking directly to the server (the
 default), this is unset and no metadata is sent; the server doesn't look for
 it either way.
+
+If whichever server ``MATHFORGE_GRPC_TARGET`` points at is serving TLS
+(``MATHFORGE_GRPC_TLS_CERT``/``_KEY`` on ``grpc_server.py``, or
+``MATHFORGE_GATEWAY_TLS_CERT``/``_KEY`` on ``gateway-rs``), set
+``MATHFORGE_GRPC_TLS_CA`` to the CA/cert PEM to trust — see
+``build_channel``. Unset, the channel is plaintext, matching today's
+default.
 """
 
 from __future__ import annotations
@@ -33,6 +40,8 @@ import logging
 import os
 import sys
 import uuid
+from contextlib import AbstractAsyncContextManager
+from pathlib import Path
 
 import grpc
 from dotenv import load_dotenv
@@ -41,6 +50,20 @@ import chat_pb2
 import chat_pb2_grpc
 
 HEALTH_CHECK_TIMEOUT_SEC = 5.0
+
+
+def build_channel(target: str) -> AbstractAsyncContextManager[grpc.aio.Channel]:
+    """Open a channel to ``target`` — secure when ``MATHFORGE_GRPC_TLS_CA`` is
+    set (trusting that CA/cert to verify whichever server ``target`` points
+    at, whether that's ``grpc_server.py`` directly or the Rust gateway in
+    front of it), plaintext otherwise, matching today's default behavior.
+    """
+    ca_path = os.getenv("MATHFORGE_GRPC_TLS_CA", "").strip()
+    if not ca_path:
+        return grpc.aio.insecure_channel(target)
+    ca_bytes = Path(ca_path).read_bytes()
+    credentials = grpc.ssl_channel_credentials(root_certificates=ca_bytes)
+    return grpc.aio.secure_channel(target, credentials)
 
 
 def grpc_metadata() -> tuple[tuple[str, str], ...]:
@@ -145,7 +168,7 @@ async def async_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     target = os.getenv("MATHFORGE_GRPC_TARGET", "127.0.0.1:50051")
-    async with grpc.aio.insecure_channel(target) as channel:
+    async with build_channel(target) as channel:
         stub = chat_pb2_grpc.MathForgeChatStub(channel)
         model = await check_server_health(stub)
         if model is None:

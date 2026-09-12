@@ -15,7 +15,8 @@ import pytest
 
 import chat_pb2
 import main as main_module
-from main import async_main, check_server_health, grpc_metadata, run_turn
+from main import async_main, build_channel, check_server_health, grpc_metadata, run_turn
+from tests.helpers import generate_self_signed_cert
 
 
 class _FakeStub:
@@ -49,6 +50,40 @@ class _FakeChannel:
 
     async def __aexit__(self, *exc_info):
         return False
+
+
+def test_build_channel_is_plaintext_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MATHFORGE_GRPC_TLS_CA", raising=False)
+    calls: list[str] = []
+
+    def _fake_insecure_channel(target):
+        calls.append(target)
+        return _FakeChannel()
+
+    monkeypatch.setattr(main_module.grpc.aio, "insecure_channel", _fake_insecure_channel)
+    build_channel("127.0.0.1:50051")
+    assert calls == ["127.0.0.1:50051"]
+
+
+def test_build_channel_is_secure_when_ca_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    cert_pem, _key_pem = generate_self_signed_cert()
+    ca_path = tmp_path / "ca.crt"
+    ca_path.write_bytes(cert_pem)
+    monkeypatch.setenv("MATHFORGE_GRPC_TLS_CA", str(ca_path))
+    secure_calls: list[tuple] = []
+
+    def _fake_secure_channel(target, creds):
+        secure_calls.append((target, creds))
+        return _FakeChannel()
+
+    monkeypatch.setattr(main_module.grpc.aio, "secure_channel", _fake_secure_channel)
+
+    build_channel("127.0.0.1:50051")
+
+    assert len(secure_calls) == 1
+    assert secure_calls[0][0] == "127.0.0.1:50051"
 
 
 def test_grpc_metadata_empty_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
