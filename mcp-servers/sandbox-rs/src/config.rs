@@ -13,6 +13,10 @@ pub struct Config {
     pub timeout: Duration,
     pub max_memory_mb: u64,
     pub max_output_bytes: usize,
+    /// cgroup v2 `pids.max` for the sandboxed subtree, when cgroups are
+    /// available (see `cgroup.rs`) — a real per-subtree fork-bomb guard,
+    /// unlike the `RLIMIT_NPROC` attempt `limits.rs` documents dropping.
+    pub max_processes: u64,
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -29,6 +33,7 @@ impl Config {
         let timeout_sec: f64 = env_or("MATHFORGE_CODE_TIMEOUT_SEC", 30.0);
         let max_memory_mb: u64 = env_or("MATHFORGE_SANDBOX_MAX_MEMORY_MB", 512);
         let max_output_bytes: usize = env_or("MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES", 256_000);
+        let max_processes: u64 = env_or("MATHFORGE_SANDBOX_MAX_PROCESSES", 64);
 
         Self {
             workspace_root: PathBuf::from(workspace_root)
@@ -37,6 +42,7 @@ impl Config {
             timeout: Duration::from_secs_f64(timeout_sec.max(0.1)),
             max_memory_mb,
             max_output_bytes,
+            max_processes,
         }
     }
 }

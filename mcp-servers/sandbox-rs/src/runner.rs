@@ -9,8 +9,14 @@
 //! - Output is read with a running cap instead of buffered to EOF then
 //!   truncated, so a child can't grow parent memory unboundedly by writing
 //!   output faster than the cap even before it's killed.
+//! - When a delegated cgroup v2 subtree is available (see [`crate::cgroup`]),
+//!   the child is moved into a fresh cgroup with `pids.max` set — a real
+//!   per-subtree fork-bomb guard, unlike the `RLIMIT_NPROC` attempt
+//!   `limits.rs` documents dropping. Opportunistic: falls back to the
+//!   process-group kill alone when cgroups aren't usable on this host.
 
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -19,6 +25,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::cgroup::{self, SandboxCgroup};
 use crate::config::Config;
 use crate::env::{SANDBOX_PREAMBLE, minimal_env};
 use crate::limits::ResourceLimits;
@@ -58,13 +65,38 @@ pub async fn run_python_code_isolated(code: &str, config: &Config) -> String {
         .stderr(Stdio::piped())
         .process_group(0);
 
-    // Safety: `apply()` only calls `setrlimit`, which is async-signal-safe and
-    // runs in the forked child before `execve` — it never touches the parent.
+    // Opportunistic — None if this host has no delegated cgroup v2 subtree
+    // (see cgroup.rs). Opening cgroup.procs here (in the parent, before
+    // spawn) rather than by path inside pre_exec keeps that closure doing
+    // as little as possible post-fork.
+    let cgroup = SandboxCgroup::create(config.max_processes);
+    let procs_file = cgroup.as_ref().and_then(|cg| cg.procs_file().ok());
+    let procs_fd = procs_file.as_ref().map(|f| f.as_raw_fd());
+
+    // Safety: `apply()` only calls `setrlimit`; the cgroup move only calls
+    // `getpid()` and a raw `write()` on an already-open fd — all
+    // async-signal-safe, no heap allocation, and this runs in the forked
+    // child before `execve`, never touching the parent.
     unsafe {
-        cmd.pre_exec(move || limits.apply());
+        cmd.pre_exec(move || {
+            limits.apply()?;
+            if let Some(fd) = procs_fd {
+                let pid = libc::getpid() as u32;
+                let mut buf = [0u8; 10];
+                let bytes = cgroup::format_pid(pid, &mut buf);
+                let written = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                if written < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
 
-    let result = run_with_timeout(cmd, config.timeout, config.max_output_bytes).await;
+    let result = run_with_timeout(cmd, config.timeout, config.max_output_bytes, cgroup).await;
+    // procs_file/cgroup must outlive `spawn()` inside run_with_timeout (the
+    // fd has to still be open when the child forks) — both drop here, after.
+    drop(procs_file);
     let _ = std::fs::remove_file(&script_path);
     result
 }
@@ -79,7 +111,12 @@ fn write_script(workspace: &Path, script: &str) -> std::io::Result<std::path::Pa
     Ok(path)
 }
 
-async fn run_with_timeout(mut cmd: Command, dur: Duration, max_bytes: usize) -> String {
+async fn run_with_timeout(
+    mut cmd: Command,
+    dur: Duration,
+    max_bytes: usize,
+    cgroup: Option<SandboxCgroup>,
+) -> String {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Failed to start sandbox process: {e}"),
@@ -93,8 +130,15 @@ async fn run_with_timeout(mut cmd: Command, dur: Duration, max_bytes: usize) -> 
 
     match timeout(dur, child.wait()).await {
         Err(_) => {
+            // Kill the whole cgroup first if we have one — stronger than the
+            // process-group kill below, since it also catches anything that
+            // escaped the process group (e.g. via setsid()).
+            if let Some(ref cg) = cgroup {
+                cg.kill_all();
+            }
             // Negative pid == kill the whole process group, so grandchildren
-            // spawned by the script die too, not just the direct child.
+            // spawned by the script die too, not just the direct child. Kept
+            // as a fallback even when the cgroup kill above already fired.
             if let Some(pid) = pid {
                 unsafe {
                     libc::kill(-(pid as libc::pid_t), libc::SIGKILL);

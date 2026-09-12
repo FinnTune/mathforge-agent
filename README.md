@@ -36,7 +36,8 @@ see [Rust gRPC gateway](#rust-grpc-gateway).
 
 - **Not a cryptographic sandbox.** Untrusted code still runs as your user on your machine, with filesystem access under the chosen workspace and whatever the Python standard library allows.
 - **Process isolation + resource limits (`mcp-servers/sandbox-rs`):** a fresh interpreter per run, a stripped environment (no `ANTHROPIC_API_KEY` in the child), and — applied via `setrlimit` in the child before `exec`, not just a wall-clock timeout — a CPU-time cap, a memory (`RLIMIT_AS`) cap, and an open-file cap. On timeout the whole process group is killed, not just the direct child, so a script's own subprocesses can't outlive it. Captured output is read with a running cap rather than buffered to EOF then truncated, bounding the parent's memory regardless of how much the child tries to write.
-- **Deliberately not relying on `RLIMIT_NPROC`** as a fork-bomb guard — on Linux it caps the real UID's total process count system-wide, not the child's subtree, so it's the wrong tool here. A correct per-subtree guard needs a cgroup with `pids.max`; that's known future work, not implemented yet.
+- **Deliberately not relying on `RLIMIT_NPROC`** as a fork-bomb guard — on Linux it caps the real UID's total process count system-wide, not the child's subtree, so it's the wrong tool here.
+- **Fork-bomb guard via cgroup v2 `pids.max`** (`mcp-servers/sandbox-rs/src/cgroup.rs`): the correct per-subtree limit `RLIMIT_NPROC` can't provide. Opportunistic, not required — it needs the sandbox process to already be sitting in a *delegated* cgroup v2 subtree (true under a normal systemd user session; **not** guaranteed in containers without delegation, non-systemd init, or non-Linux). Falls back to the rlimits/process-group protections above alone when cgroups aren't usable on the host — never fails a run because of this. On timeout, also SIGKILLs the whole cgroup (`cgroup.kill`), which is stronger than the process-group kill alone since it catches anything that escaped the group (e.g. via `setsid()`). `MATHFORGE_SANDBOX_MAX_PROCESSES` (default 64).
 - **Stronger isolation** (containers, gVisor, remote sandboxes) is recommended if you accept **arbitrary** prompts or untrusted users.
 
 ## Quick start
@@ -249,6 +250,7 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_SANDBOX_PYTHON` | Python interpreter the sandbox invokes (needs numpy/sympy/matplotlib/scipy). |
 | `MATHFORGE_SANDBOX_MAX_MEMORY_MB` | Sandbox `RLIMIT_AS` cap in MB. |
 | `MATHFORGE_SANDBOX_MAX_OUTPUT_BYTES` | Cap on captured sandbox stdout+stderr. |
+| `MATHFORGE_SANDBOX_MAX_PROCESSES` | cgroup v2 `pids.max` fork-bomb guard (default 64; opportunistic, see Security model). |
 | `VOYAGE_API_KEY` | Required to actually retrieve anything via `search_math_knowledge` / to run `ingest.py`. |
 | `VOYAGE_MODEL` | Voyage embedding model (default `voyage-3-lite`). |
 | `QDRANT_URL` | Qdrant REST endpoint (default `http://localhost:6333`). |
