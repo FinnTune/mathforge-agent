@@ -1,6 +1,9 @@
 # Environment secrets
 .env
 
+# Self-signed dev TLS certs (scripts/generate_dev_certs.sh)
+certs/
+
 # Python
 .venv/
 venv/

@@ -23,6 +23,7 @@ from grpc_server import MathForgeChatServicer
 from tests.helpers import (
     ScriptedStreamingToolModel,
     ScriptedToolModel,
+    generate_self_signed_cert,
     make_fake_execute_python_tool,
     make_fake_search_math_knowledge_tool,
 )
@@ -232,5 +233,80 @@ async def test_full_loopback_with_real_grpc_server(dummy_settings) -> None:
             kinds = [e.WhichOneof("event") for e in events]
             assert kinds == ["text_delta", "done"]
             assert events[0].text_delta.text == "Loopback answer."
+    finally:
+        await server.stop(None)
+
+
+@pytest.mark.asyncio
+async def test_full_loopback_with_real_grpc_server_over_tls(dummy_settings) -> None:
+    """Same as the plaintext loopback test above, but with a real TLS
+    handshake — a throwaway self-signed cert/key pair (see
+    ``generate_self_signed_cert``), no mocking of ``ssl_server_credentials``/
+    ``ssl_channel_credentials``.
+    """
+    model = ScriptedToolModel(
+        [
+            AIMessage(content="draft"),
+            _verification_message(sufficient=True),
+            AIMessage(content="Secure loopback answer."),
+        ]
+    )
+    agent = build_agent_graph(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
+    servicer = MathForgeChatServicer(agent, dummy_settings)
+    cert_pem, key_pem = generate_self_signed_cert()
+
+    server = grpc.aio.server()
+    chat_pb2_grpc.add_MathForgeChatServicer_to_server(servicer, server)
+    server_credentials = grpc.ssl_server_credentials([(key_pem, cert_pem)])
+    port = server.add_secure_port("127.0.0.1:0", server_credentials)
+    await server.start()
+
+    try:
+        channel_credentials = grpc.ssl_channel_credentials(root_certificates=cert_pem)
+        async with grpc.aio.secure_channel(
+            f"localhost:{port}", channel_credentials
+        ) as channel:
+            stub = chat_pb2_grpc.MathForgeChatStub(channel)
+
+            health = await stub.HealthCheck(chat_pb2.HealthCheckRequest())
+            assert health.ok is True
+
+            events = [
+                event
+                async for event in stub.Chat(chat_pb2.ChatRequest(thread_id="t6", query="hi"))
+            ]
+            kinds = [e.WhichOneof("event") for e in events]
+            assert kinds == ["text_delta", "done"]
+            assert events[0].text_delta.text == "Secure loopback answer."
+    finally:
+        await server.stop(None)
+
+
+@pytest.mark.asyncio
+async def test_tls_client_rejects_untrusted_server_cert(dummy_settings) -> None:
+    """A client trusting a *different* CA than the one the server presents
+    must fail the handshake, not silently connect — the negative-path
+    counterpart to the happy-path TLS loopback test above.
+    """
+    model = ScriptedToolModel([AIMessage(content="unreachable")])
+    agent = build_agent_graph(dummy_settings, llm=model, tools=[make_fake_execute_python_tool()])
+    servicer = MathForgeChatServicer(agent, dummy_settings)
+    server_cert_pem, server_key_pem = generate_self_signed_cert()
+    other_cert_pem, _ = generate_self_signed_cert()
+
+    server = grpc.aio.server()
+    chat_pb2_grpc.add_MathForgeChatServicer_to_server(servicer, server)
+    server_credentials = grpc.ssl_server_credentials([(server_key_pem, server_cert_pem)])
+    port = server.add_secure_port("127.0.0.1:0", server_credentials)
+    await server.start()
+
+    try:
+        channel_credentials = grpc.ssl_channel_credentials(root_certificates=other_cert_pem)
+        async with grpc.aio.secure_channel(
+            f"localhost:{port}", channel_credentials
+        ) as channel:
+            stub = chat_pb2_grpc.MathForgeChatStub(channel)
+            with pytest.raises(grpc.aio.AioRpcError):
+                await stub.HealthCheck(chat_pb2.HealthCheckRequest(), timeout=5)
     finally:
         await server.stop(None)

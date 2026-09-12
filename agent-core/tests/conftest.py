@@ -33,4 +33,6 @@ def dummy_settings(tmp_path) -> Settings:
         verification_max_attempts=2,
         grpc_host="127.0.0.1",
         grpc_port=50051,
+        tls_cert_path=None,
+        tls_key_path=None,
     )

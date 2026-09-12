@@ -7,14 +7,54 @@ the graph uses our scripted ``_generate`` responses in order.
 
 from __future__ import annotations
 
+import datetime
+import ipaddress
 import json
 from typing import Any
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import BaseTool, tool
+
+
+def generate_self_signed_cert() -> tuple[bytes, bytes]:
+    """A throwaway self-signed cert/key pair (PEM) covering localhost/127.0.0.1,
+    generated fresh per call — for real TLS loopback tests without any
+    secret material checked into the repo (see ``scripts/generate_dev_certs.sh``
+    for the equivalent used for manual/live testing).
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return cert_pem, key_pem
 
 
 class ScriptedToolModel(BaseChatModel):

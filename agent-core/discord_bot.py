@@ -25,13 +25,12 @@ from collections import defaultdict
 from collections.abc import Iterator
 
 import discord
-import grpc
 from discord import app_commands
 from dotenv import load_dotenv
 
 import chat_pb2
 import chat_pb2_grpc
-from main import check_server_health, grpc_metadata
+from main import build_channel, check_server_health, grpc_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +107,7 @@ async def async_main() -> int:
     target = os.getenv("MATHFORGE_GRPC_TARGET", "127.0.0.1:50051")
     # The gRPC channel must stay open for the whole bot process lifetime,
     # same reasoning as the checkpointer connection did before this phase.
-    async with grpc.aio.insecure_channel(target) as channel:
+    async with build_channel(target) as channel:
         stub = chat_pb2_grpc.MathForgeChatStub(channel)
         model = await check_server_health(stub)
         if model is None:
