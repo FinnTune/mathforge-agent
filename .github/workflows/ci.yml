@@ -80,6 +80,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: gateway-rs
+      # build.rs (tonic-prost-build -> prost-build) needs a real `protoc` on
+      # PATH — recent prost-build no longer vendors/downloads one itself.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       # No Python/Docker dependency — the fake upstream in tests/ is pure Rust.
