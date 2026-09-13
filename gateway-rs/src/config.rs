@@ -23,6 +23,12 @@ pub struct Config {
     /// CA certificate to verify the upstream (`grpc_server.py`) with. Unset
     /// (default) means the upstream connection stays plaintext.
     pub upstream_tls_ca_path: Option<String>,
+    /// OTLP/gRPC endpoint (e.g. `http://jaeger:4317`) to export traces to.
+    /// Unset (default) means tracing is local-only (`fmt` logging), no OTLP
+    /// traffic — same opt-in-by-presence pattern as the TLS fields above.
+    pub otlp_endpoint: Option<String>,
+    /// Bind address for the Prometheus `/metrics` endpoint.
+    pub metrics_addr: String,
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -77,6 +83,9 @@ impl Config {
             );
         }
 
+        let metrics_host = env_or("MATHFORGE_GATEWAY_METRICS_HOST", "127.0.0.1");
+        let metrics_port = env_or("MATHFORGE_GATEWAY_METRICS_PORT", "9090");
+
         Ok(Self {
             bind_addr: format!("{host}:{port}"),
             upstream,
@@ -85,6 +94,8 @@ impl Config {
             tls_cert_path,
             tls_key_path,
             upstream_tls_ca_path,
+            otlp_endpoint: env_opt("MATHFORGE_OTLP_ENDPOINT"),
+            metrics_addr: format!("{metrics_host}:{metrics_port}"),
         })
     }
 }

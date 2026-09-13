@@ -96,6 +96,9 @@ class Settings:
     # default) means plaintext, matching today's behavior.
     tls_cert_path: str | None
     tls_key_path: str | None
+    # OTLP/gRPC endpoint (e.g. "http://jaeger:4317") to export traces to.
+    # Unset (default) means tracing is inert — see telemetry.py.
+    otlp_endpoint: str | None
 
 
 def load_settings() -> Settings:
@@ -137,4 +140,5 @@ def load_settings() -> Settings:
         grpc_port=_env_int("MATHFORGE_GRPC_PORT", 50051),
         tls_cert_path=os.getenv("MATHFORGE_GRPC_TLS_CERT") or None,
         tls_key_path=os.getenv("MATHFORGE_GRPC_TLS_KEY") or None,
+        otlp_endpoint=os.getenv("MATHFORGE_OTLP_ENDPOINT") or None,
     )

@@ -12,6 +12,15 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  # Distributed tracing backend (see README "Observability"). Zero config
+  # needed — OTLP is native in Jaeger v2, unlike the old all-in-one v1 image.
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    ports:
+      - "16686:16686" # web UI
+      - "4317:4317" # OTLP/gRPC receiver — agent/gateway export spans here
+      - "4318:4318" # OTLP/HTTP receiver (unused; exposed for parity)
+
   # agent-core + both MCP servers (spawned as its stdio subprocesses — see
   # agent-core/Dockerfile for why they're one image, not three).
   agent:
@@ -23,8 +32,10 @@ services:
       # Overrides .env's localhost default for the compose network — the
       # other QDRANT_* / VOYAGE_* / ANTHROPIC_API_KEY vars come from env_file.
       QDRANT_URL: http://qdrant:6333
+      MATHFORGE_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       - qdrant
+      - jaeger
     ports:
       - "50051:50051"
     restart: unless-stopped
@@ -41,10 +52,14 @@ services:
     env_file: .env
     environment:
       MATHFORGE_GATEWAY_UPSTREAM: http://agent:50051
+      MATHFORGE_GATEWAY_METRICS_HOST: 0.0.0.0
+      MATHFORGE_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       - agent
+      - jaeger
     ports:
       - "50052:50052"
+      - "9090:9090" # Prometheus /metrics
     restart: unless-stopped
 
   # One-off: `docker compose run --rm ingest` embeds mcp-servers/mathkb-py's

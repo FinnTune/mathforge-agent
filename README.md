@@ -56,7 +56,7 @@ cp .env.example .env
 # and MATHFORGE_GATEWAY_API_KEYS (required — pick any string; the `cli`
 # service below needs the same value in MATHFORGE_GRPC_API_KEY).
 
-docker compose up --build -d qdrant agent gateway
+docker compose up --build -d qdrant jaeger agent gateway
 
 # Optional: embed the RAG corpus into Qdrant (one-off; needs VOYAGE_API_KEY)
 docker compose run --rm ingest
@@ -68,8 +68,9 @@ docker compose run --rm cli
 `agent` bundles agent-core + both MCP servers (they're stdio subprocesses of
 `grpc_server.py`, not independent services — see `agent-core/Dockerfile`);
 `gateway` is `gateway-rs` (auth + rate limiting) in front of it; `cli` is a
-throwaway container running `main.py` against the gateway. `docker compose
-logs -f agent` to watch the server; `docker compose down -v` to tear
+throwaway container running `main.py` against the gateway; `jaeger` is the
+distributed-tracing backend, see [Observability](#observability). `docker
+compose logs -f agent` to watch the server; `docker compose down -v` to tear
 everything down (including Qdrant's data volume).
 
 ### Manual setup
@@ -291,6 +292,38 @@ MATHFORGE_GRPC_TARGET=127.0.0.1:50052 MATHFORGE_GRPC_API_KEY=some-secret-key \
 MATHFORGE_GRPC_TLS_CA=certs/server.crt mathforge
 ```
 
+## Observability
+
+Distributed tracing (OpenTelemetry) across the whole request path — a real
+W3C trace context is created in `gateway-rs`, propagated over gRPC metadata
+into `grpc_server.py`, which in turn wraps each planner tool call
+(`execute_python`/`search_math_knowledge`) in its own child span. One trace
+per query ends up showing `gateway.chat` → `grpc.Chat` → `tool.<name>` as a
+single timeline, across the Rust/Python boundary. Opt-in via
+`MATHFORGE_OTLP_ENDPOINT` (read by both `grpc_server.py` and `gateway-rs`);
+unset (the default) means tracing is fully inert — no OTLP traffic, same
+pattern as [TLS](#tls) above.
+
+```bash
+docker compose up -d jaeger   # OTLP receiver + UI, no config file needed
+# MATHFORGE_OTLP_ENDPOINT=http://jaeger:4317 is already set for the `agent`
+# and `gateway` Docker Compose services — see docker-compose.yml
+```
+
+Open `http://localhost:16686`, pick `mathforge-gateway` or `mathforge-agent`
+as the service, and find a trace from a query you ran through it. Running
+components manually (outside Docker) works the same way — start any OTLP
+collector (Jaeger or otherwise) and set `MATHFORGE_OTLP_ENDPOINT` to its
+`http(s)://host:4317` before starting `mathforge-server`/`mathforge-gateway`.
+
+`gateway-rs` also exposes a small hand-rolled Prometheus `/metrics` endpoint
+(`MATHFORGE_GATEWAY_METRICS_HOST`/`_PORT`, default `127.0.0.1:9090`, always
+on regardless of tracing) with per-outcome request counters:
+
+```bash
+curl localhost:9090/metrics
+```
+
 ## RAG knowledge base
 
 `mcp-servers/mathkb-py` is a second MCP server exposing one tool,
@@ -337,6 +370,8 @@ See `.env.example`. Notable variables:
 | `MATHFORGE_GATEWAY_UPSTREAM` | Server address the gateway forwards to (default `http://127.0.0.1:50051`). |
 | `MATHFORGE_GATEWAY_API_KEYS` | **Required to start the gateway** — comma-separated allowed keys. |
 | `MATHFORGE_GATEWAY_RATE_LIMIT_PER_MINUTE` | Per-API-key quota before `RESOURCE_EXHAUSTED` (default 30). |
+| `MATHFORGE_GATEWAY_METRICS_HOST` / `MATHFORGE_GATEWAY_METRICS_PORT` | Prometheus `/metrics` bind address (default `127.0.0.1:9090`). |
+| `MATHFORGE_OTLP_ENDPOINT` | Read by both `grpc_server.py` and `gateway-rs`: OTLP/gRPC collector to export traces to (see [Observability](#observability)). Unset means tracing is inert. |
 | `MATHFORGE_LOG_LEVEL` | `logging` level for the app. |
 | `DISCORD_BOT_TOKEN` | Required only for `mathforge-discord`. |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | Optional comma-separated channel allowlist. |
