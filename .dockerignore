@@ -1,0 +1,11 @@
+.git/
+target/
+.venv*/
+venv/
+__pycache__/
+*.pyc
+.mathforge/
+plots/
+certs/
+*.log
+.env

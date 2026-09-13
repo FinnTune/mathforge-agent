@@ -1,5 +1,8 @@
-# Local infra for MathForge. Currently just Qdrant, the vector store behind
-# the RAG MCP server (mcp-servers/mathkb-py). Run: docker compose up -d
+# Local infra + the app itself. `docker compose up -d qdrant agent gateway`
+# runs the whole stack; `docker compose run --rm ingest` embeds the RAG
+# corpus once; `docker compose run --rm cli` talks to it interactively.
+# Requires `.env` (copy from `.env.example`) with at least ANTHROPIC_API_KEY
+# and MATHFORGE_GATEWAY_API_KEYS set — see README "Docker".
 services:
   qdrant:
     image: qdrant/qdrant:v1.19.0 # kept in step with qdrant-client's pin in mcp-servers/mathkb-py/pyproject.toml
@@ -8,6 +11,73 @@ services:
       - "6334:6334" # gRPC API (unused today; exposed for parity/future use)
     volumes:
       - qdrant_storage:/qdrant/storage
+
+  # agent-core + both MCP servers (spawned as its stdio subprocesses — see
+  # agent-core/Dockerfile for why they're one image, not three).
+  agent:
+    build:
+      context: .
+      dockerfile: agent-core/Dockerfile
+    env_file: .env
+    environment:
+      # Overrides .env's localhost default for the compose network — the
+      # other QDRANT_* / VOYAGE_* / ANTHROPIC_API_KEY vars come from env_file.
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      - qdrant
+    ports:
+      - "50051:50051"
+    restart: unless-stopped
+
+  # gateway-rs: auth + rate limiting in front of `agent`. `depends_on` only
+  # waits for the `agent` container to start, not for grpc_server.py to
+  # finish building the graph and bind its port (several seconds) — tonic's
+  # connect at startup fails fast if that's not ready yet, so `restart` lets
+  # Compose retry until it is, instead of a one-shot crash.
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway-rs/Dockerfile
+    env_file: .env
+    environment:
+      MATHFORGE_GATEWAY_UPSTREAM: http://agent:50051
+    depends_on:
+      - agent
+    ports:
+      - "50052:50052"
+    restart: unless-stopped
+
+  # One-off: `docker compose run --rm ingest` embeds mcp-servers/mathkb-py's
+  # corpus into Qdrant. Reuses the `agent` image (already has mathkb's venv +
+  # corpus baked in) rather than building a separate image for one script.
+  ingest:
+    build:
+      context: .
+      dockerfile: agent-core/Dockerfile
+    env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      - qdrant
+    working_dir: /app/mcp-servers/mathkb-py
+    command: ["/opt/venvs/mathkb/bin/python", "ingest.py"]
+    profiles: ["ingest"]
+
+  # Interactive: `docker compose run --rm cli`. Reuses the `agent` image —
+  # main.py is already installed in its venv.
+  cli:
+    build:
+      context: .
+      dockerfile: agent-core/Dockerfile
+    env_file: .env
+    environment:
+      MATHFORGE_GRPC_TARGET: gateway:50052
+    depends_on:
+      - gateway
+    command: ["mathforge"]
+    stdin_open: true
+    tty: true
+    profiles: ["cli"]
 
 volumes:
   qdrant_storage:

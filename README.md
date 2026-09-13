@@ -42,6 +42,38 @@ see [Rust gRPC gateway](#rust-grpc-gateway).
 
 ## Quick start
 
+The fastest path is Docker (below); see [Manual setup](#manual-setup) for
+running each component directly on the host instead (useful for hacking on
+one piece at a time).
+
+### Docker
+
+```bash
+git clone https://github.com/yourusername/mathforge-agent.git
+cd mathforge-agent
+cp .env.example .env
+# Fill in ANTHROPIC_API_KEY (required), VOYAGE_API_KEY (optional, for RAG),
+# and MATHFORGE_GATEWAY_API_KEYS (required — pick any string; the `cli`
+# service below needs the same value in MATHFORGE_GRPC_API_KEY).
+
+docker compose up --build -d qdrant agent gateway
+
+# Optional: embed the RAG corpus into Qdrant (one-off; needs VOYAGE_API_KEY)
+docker compose run --rm ingest
+
+# Talk to it
+docker compose run --rm cli
+```
+
+`agent` bundles agent-core + both MCP servers (they're stdio subprocesses of
+`grpc_server.py`, not independent services — see `agent-core/Dockerfile`);
+`gateway` is `gateway-rs` (auth + rate limiting) in front of it; `cli` is a
+throwaway container running `main.py` against the gateway. `docker compose
+logs -f agent` to watch the server; `docker compose down -v` to tear
+everything down (including Qdrant's data volume).
+
+### Manual setup
+
 ```bash
 git clone https://github.com/yourusername/mathforge-agent.git
 cd mathforge-agent
