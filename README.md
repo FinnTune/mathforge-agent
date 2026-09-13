@@ -1,14 +1,42 @@
 # MathForge — LangGraph + Claude math and code agent
 
-An agent built with **LangGraph** and **Claude (Anthropic)** using a hand-rolled planner → tools → verifier → responder graph (not just a prebuilt ReAct loop — see [Agent design](#agent-design)), served over **gRPC** (see [gRPC service](#grpc-service)) so the CLI and Discord bot are thin clients of one long-running server, optionally fronted by a **Rust gRPC gateway** for auth and rate limiting (see [Rust gRPC gateway](#rust-grpc-gateway)). It solves math and coding tasks by generating Python, running it in a **hardened, isolated process** via an **MCP** tool server, grounding answers in a **RAG** knowledge base over a second MCP server, self-checking its own work before answering, and remembering conversations across restarts.
+MathForge solves math and coding problems by generating Python, running it in
+a hardened sandbox, grounding answers in a retrieved knowledge base, and
+checking its own work before responding. It's also a small distributed
+system in miniature: a Rust gRPC gateway in front of a Python LangGraph
+agent, talking to two MCP tool servers, with distributed tracing across the
+whole request path.
+
+**What this demonstrates:**
+
+- **Agentic design** — hand-rolled planner → tools → verifier → responder LangGraph, not a prebuilt ReAct loop (see [Agent design](#agent-design))
+- **MCP** — two Model Context Protocol tool servers (a Rust sandbox, a Python RAG server), spoken over stdio, the same transport Claude Desktop uses
+- **RAG** — Qdrant + Voyage embeddings grounding answers in a self-authored knowledge base (see [RAG knowledge base](#rag-knowledge-base))
+- **gRPC** — one long-running Python server, thin CLI/Discord clients, and an optional Rust auth/rate-limit gateway in front of it, all sharing one proto contract (see [gRPC service](#grpc-service))
+- **Rust** — the sandbox (real rlimits + a cgroup v2 fork-bomb guard) and the gateway (auth, rate limiting, TLS, tracing, metrics)
+- **Production hardening** — opt-in [TLS](#tls) on every hop, a full [Docker Compose](#quick-start) stack, and [OpenTelemetry tracing](#observability) across the Rust/Python boundary
 
 ## Architecture
+
+```mermaid
+flowchart LR
+    CLI[CLI] --> Gateway
+    Discord[Discord bot] --> Gateway
+    Gateway[gateway-rs — auth, rate limit] --> Server
+    Server[grpc_server.py — LangGraph agent] --> Claude(["Claude API"])
+    Server -->|MCP / stdio| Sandbox[sandbox-rs — execute_python]
+    Server -->|MCP / stdio| Mathkb[mathkb-py — search_math_knowledge]
+    Mathkb --> Qdrant[("Qdrant")]
+    Gateway -. OTLP .-> Jaeger(["Jaeger"])
+    Server -. OTLP .-> Jaeger
+```
 
 MathForge is a polyglot monorepo, one directory per component:
 
 ```
 agent-core/          Python — LangGraph agent (see "Agent design"); one gRPC
-                      server (grpc_server.py) + two thin clients (CLI, Discord)
+                      server (grpc_server.py) + two thin clients (CLI, Discord);
+                      Dockerfile bundles agent-core + both MCP servers below
 mcp-servers/
   sandbox-rs/         Rust MCP server — executes model-generated Python in a
                        resource-limited subprocess (the trust boundary)
@@ -18,7 +46,9 @@ proto/chat.proto      gRPC service definition — agent-core's server + clients
                        AND gateway-rs generate their stubs from this one file
 gateway-rs/           Rust gRPC gateway (tonic) — optional auth + rate
                        limiting in front of grpc_server.py (see below)
-docker-compose.yml    Qdrant (vector store behind mathkb-py)
+scripts/              Codegen (generate_proto.sh) and dev-cert (generate_dev_certs.sh) helpers
+docker-compose.yml    Full stack: Qdrant, Jaeger, agent, gateway, plus
+                       one-off ingest/cli services — see "Quick start"
 ```
 
 Within `agent-core`, `grpc_server.py` builds the agent graph once (loading
