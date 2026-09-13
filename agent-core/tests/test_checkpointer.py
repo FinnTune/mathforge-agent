@@ -41,6 +41,7 @@ def _settings_with_db(db_path: Path) -> Settings:
         grpc_port=50051,
         tls_cert_path=None,
         tls_key_path=None,
+        otlp_endpoint=None,
     )
 
 

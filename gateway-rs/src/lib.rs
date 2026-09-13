@@ -10,6 +10,8 @@
 
 pub mod config;
 pub mod gateway;
+pub mod metrics;
+pub mod telemetry;
 pub mod tls;
 
 pub mod pb {

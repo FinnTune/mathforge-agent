@@ -21,15 +21,19 @@ from pathlib import Path
 import grpc
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from opentelemetry import propagate
+from opentelemetry import trace as otel_trace
 
 import chat_pb2
 import chat_pb2_grpc
+import telemetry
 from agent import build_agent_graph
 from checkpointer import build_checkpointer
 from config import Settings, load_settings
 from mcp_client import load_mcp_tools
 
 logger = logging.getLogger(__name__)
+tracer = otel_trace.get_tracer(__name__)
 
 
 def _content_to_text(content: object) -> str:
@@ -60,6 +64,14 @@ class MathForgeChatServicer(chat_pb2_grpc.MathForgeChatServicer):
             "recursion_limit": self._settings.recursion_limit,
             "configurable": {"thread_id": request.thread_id},
         }
+        # Join the caller's trace (gateway-rs, when tracing is configured —
+        # see telemetry.py) as a child span, rather than starting a
+        # disconnected one. `context` is None in unit tests that call this
+        # generator directly; invocation_metadata() is only meaningful on a
+        # real grpc.aio ServicerContext.
+        incoming_metadata = context.invocation_metadata() if context is not None else ()
+        parent_ctx = propagate.extract(dict(incoming_metadata))
+
         # Tool-call args stream in as raw JSON fragments across many chunks
         # (name in the first, then only `args` deltas — LangChain surfaces
         # each chunk's own `.tool_calls` as a *partial* reconstruction, not
@@ -69,6 +81,11 @@ class MathForgeChatServicer(chat_pb2_grpc.MathForgeChatServicer):
         # the previous call's streaming is done.
         pending_chunk: AIMessageChunk | None = None
         pending_node: str | None = None
+        # One span per in-flight tool call, keyed by tool_call_id, so the
+        # Jaeger timeline shows each sandbox/mathkb round trip as its own
+        # child span — started when its tool_call event is flushed, ended
+        # when the matching ToolMessage arrives.
+        tool_spans_by_call_id: dict[str, otel_trace.Span] = {}
 
         def flush_pending_tool_calls() -> list:
             nonlocal pending_chunk, pending_node
@@ -80,6 +97,10 @@ class MathForgeChatServicer(chat_pb2_grpc.MathForgeChatServicer):
             if pending_chunk is not None and pending_node == "planner":
                 for call in pending_chunk.tool_calls:
                     if call.get("name"):
+                        if call.get("id"):
+                            tool_spans_by_call_id[call["id"]] = tracer.start_span(
+                                f"tool.{call['name']}"
+                            )
                         events.append(
                             chat_pb2.ChatEvent(
                                 tool_call=chat_pb2.ToolCall(
@@ -92,66 +113,84 @@ class MathForgeChatServicer(chat_pb2_grpc.MathForgeChatServicer):
             pending_node = None
             return events
 
-        try:
-            async for item in self._agent.astream(
-                input_state, config=config, stream_mode="messages"
-            ):
-                if not isinstance(item, tuple) or not item:
-                    continue
-                message, metadata = item[0], (item[1] if len(item) > 1 else {})
-                node = metadata.get("langgraph_node")
-
-                if isinstance(message, ToolMessage):
-                    for event in flush_pending_tool_calls():
-                        yield event
-                    yield chat_pb2.ChatEvent(
-                        tool_result=chat_pb2.ToolResult(
-                            tool_name=getattr(message, "name", None) or "tool",
-                            result=_content_to_text(message.content),
-                        )
-                    )
-                    continue
-
-                if isinstance(message, AIMessageChunk) and (
-                    message.tool_calls or message.tool_call_chunks
+        with tracer.start_as_current_span(
+            "grpc.Chat", context=parent_ctx, attributes={"thread_id": request.thread_id}
+        ):
+            try:
+                async for item in self._agent.astream(
+                    input_state, config=config, stream_mode="messages"
                 ):
-                    if pending_node is not None and pending_node != node:
+                    if not isinstance(item, tuple) or not item:
+                        continue
+                    message, metadata = item[0], (item[1] if len(item) > 1 else {})
+                    node = metadata.get("langgraph_node")
+
+                    if isinstance(message, ToolMessage):
                         for event in flush_pending_tool_calls():
                             yield event
-                    pending_chunk = message if pending_chunk is None else pending_chunk + message
-                    pending_node = node
-                    continue
+                        call_id = getattr(message, "tool_call_id", None)
+                        span = tool_spans_by_call_id.pop(call_id, None) if call_id else None
+                        if span is not None:
+                            span.end()
+                        yield chat_pb2.ChatEvent(
+                            tool_result=chat_pb2.ToolResult(
+                                tool_name=getattr(message, "name", None) or "tool",
+                                result=_content_to_text(message.content),
+                            )
+                        )
+                        continue
 
-                # Non-chunk AIMessage with tool_calls already complete (e.g. a
-                # non-streaming model, as in tests) — no accumulation needed.
-                if (
-                    isinstance(message, AIMessage)
-                    and not isinstance(message, AIMessageChunk)
-                    and message.tool_calls
-                ):
-                    if node == "planner":
-                        for call in message.tool_calls:
-                            if call.get("name"):
-                                yield chat_pb2.ChatEvent(
-                                    tool_call=chat_pb2.ToolCall(
-                                        tool_name=call["name"],
-                                        args_json=json.dumps(call.get("args", {})),
+                    if isinstance(message, AIMessageChunk) and (
+                        message.tool_calls or message.tool_call_chunks
+                    ):
+                        if pending_node is not None and pending_node != node:
+                            for event in flush_pending_tool_calls():
+                                yield event
+                        pending_chunk = (
+                            message if pending_chunk is None else pending_chunk + message
+                        )
+                        pending_node = node
+                        continue
+
+                    # Non-chunk AIMessage with tool_calls already complete (e.g. a
+                    # non-streaming model, as in tests) — no accumulation needed.
+                    if (
+                        isinstance(message, AIMessage)
+                        and not isinstance(message, AIMessageChunk)
+                        and message.tool_calls
+                    ):
+                        if node == "planner":
+                            for call in message.tool_calls:
+                                if call.get("name"):
+                                    if call.get("id"):
+                                        tool_spans_by_call_id[call["id"]] = tracer.start_span(
+                                            f"tool.{call['name']}"
+                                        )
+                                    yield chat_pb2.ChatEvent(
+                                        tool_call=chat_pb2.ToolCall(
+                                            tool_name=call["name"],
+                                            args_json=json.dumps(call.get("args", {})),
+                                        )
                                     )
-                                )
-                    continue
+                        continue
 
-                if not isinstance(message, AIMessage) or node != "responder":
-                    continue
-                text = _content_to_text(getattr(message, "content", None))
-                if text:
-                    yield chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text=text))
+                    if not isinstance(message, AIMessage) or node != "responder":
+                        continue
+                    text = _content_to_text(getattr(message, "content", None))
+                    if text:
+                        yield chat_pb2.ChatEvent(text_delta=chat_pb2.TextDelta(text=text))
 
-            for event in flush_pending_tool_calls():
-                yield event
-            yield chat_pb2.ChatEvent(done=chat_pb2.Done())
-        except Exception as exc:  # noqa: BLE001 — reported to the client as an Error event
-            logger.exception("Chat turn failed (thread_id=%s)", request.thread_id)
-            yield chat_pb2.ChatEvent(error=chat_pb2.Error(message=str(exc)))
+                for event in flush_pending_tool_calls():
+                    yield event
+                yield chat_pb2.ChatEvent(done=chat_pb2.Done())
+            except Exception as exc:  # noqa: BLE001 — reported to the client as an Error event
+                logger.exception("Chat turn failed (thread_id=%s)", request.thread_id)
+                yield chat_pb2.ChatEvent(error=chat_pb2.Error(message=str(exc)))
+            finally:
+                # Defensive: end any tool span that never saw a matching
+                # ToolMessage (e.g. the turn errored mid-tool-call).
+                for span in tool_spans_by_call_id.values():
+                    span.end()
 
     async def HealthCheck(self, request, context):
         return chat_pb2.HealthCheckResponse(ok=True, model=self._settings.model)
@@ -170,6 +209,7 @@ async def serve() -> int:
         level=getattr(logging, settings.log_level, logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
     )
+    telemetry.init_tracing("mathforge-agent", settings.otlp_endpoint)
 
     try:
         tools = await load_mcp_tools(settings)

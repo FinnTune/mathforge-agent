@@ -308,3 +308,44 @@ async fn gateway_listener_accepts_tls_clients_and_rejects_untrusted_ones() {
     let result = untrusted_endpoint.connect().await;
     assert!(result.is_err(), "connecting with the wrong CA should fail the TLS handshake");
 }
+
+/// The hand-rolled `/metrics` endpoint (see `src/metrics.rs`): real counters
+/// on a real `Gateway`, scraped over a real socket — no mocking of the text
+/// format or the counting logic.
+#[tokio::test]
+async fn metrics_endpoint_reports_request_counters() {
+    use std::io::Read;
+
+    let upstream_addr = spawn_fake_upstream().await;
+    let upstream = MathForgeChatClient::connect(format!("http://{upstream_addr}")).await.unwrap();
+    let gateway = Gateway::new(upstream, vec!["good-key".to_string()], 60);
+    let gateway_metrics = gateway.metrics.clone();
+    let router = Server::builder().add_service(MathForgeChatServer::new(gateway));
+    let gateway_addr = spawn_server(router).await;
+
+    let metrics_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metrics_addr = metrics_listener.local_addr().unwrap();
+    tokio::spawn(mathforge_gateway::metrics::serve_metrics(metrics_listener, gateway_metrics));
+
+    let mut client = MathForgeChatClient::connect(format!("http://{gateway_addr}")).await.unwrap();
+    // One accepted call, one rejected for a missing key.
+    let _ = client.chat(request_with_key("hi", Some("good-key"))).await;
+    let _ = client.chat(request_with_key("hi", None)).await;
+
+    // Plain blocking TCP for the scrape — this is exactly what a Prometheus
+    // scraper does, no gRPC/tonic machinery involved on this side.
+    let scrape = tokio::task::spawn_blocking(move || {
+        let mut socket = std::net::TcpStream::connect(metrics_addr).unwrap();
+        std::io::Write::write_all(&mut socket, b"GET /metrics HTTP/1.1\r\n\r\n").unwrap();
+        let mut body = String::new();
+        socket.read_to_string(&mut body).unwrap();
+        body
+    })
+    .await
+    .unwrap();
+
+    assert!(scrape.contains("200 OK"), "unexpected response: {scrape}");
+    assert!(scrape.contains("mathforge_gateway_requests_total 2"), "unexpected body: {scrape}");
+    assert!(scrape.contains("mathforge_gateway_unauthenticated_total 1"), "unexpected body: {scrape}");
+    assert!(scrape.contains("mathforge_gateway_rate_limited_total 0"), "unexpected body: {scrape}");
+}

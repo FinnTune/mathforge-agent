@@ -6,6 +6,7 @@ use mathforge_gateway::config::Config;
 use mathforge_gateway::gateway::Gateway;
 use mathforge_gateway::pb::math_forge_chat_server::MathForgeChatServer;
 use mathforge_gateway::tls::connect_upstream;
+use mathforge_gateway::{metrics, telemetry};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 async fn shutdown_signal() {
@@ -30,10 +31,6 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(msg) => {
@@ -42,10 +39,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let tracer_provider = telemetry::init_tracing(config.otlp_endpoint.as_deref());
+
     tracing::info!(upstream = %config.upstream, "connecting to upstream MathForge server");
     let upstream_ca_pem = config.upstream_tls_ca_path.as_deref().map(std::fs::read).transpose()?;
     let upstream = connect_upstream(&config.upstream, upstream_ca_pem.as_deref(), None).await?;
     let gateway = Gateway::new(upstream, config.api_keys.clone(), config.rate_limit_per_minute);
+    let gateway_metrics = gateway.metrics.clone();
+
+    let metrics_listener = tokio::net::TcpListener::bind(&config.metrics_addr).await?;
+    tokio::spawn(async move {
+        if let Err(e) = metrics::serve_metrics(metrics_listener, gateway_metrics).await {
+            tracing::error!(error = %e, "metrics endpoint failed");
+        }
+    });
 
     let addr = config.bind_addr.parse()?;
 
@@ -65,5 +72,10 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     tracing::info!("MathForge gRPC gateway shut down");
+    // Flushes any batched-but-not-yet-exported spans; a clean process exit
+    // would otherwise silently drop them.
+    if let Some(provider) = tracer_provider {
+        let _ = provider.shutdown();
+    }
     Ok(())
 }

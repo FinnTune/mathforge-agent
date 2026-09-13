@@ -35,4 +35,5 @@ def dummy_settings(tmp_path) -> Settings:
         grpc_port=50051,
         tls_cert_path=None,
         tls_key_path=None,
+        otlp_endpoint=None,
     )
