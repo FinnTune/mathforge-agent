@@ -1,7 +1,7 @@
 """MCP server exposing ``search_math_knowledge`` — retrieval over the corpus
 embedded by ``ingest.py``.
 
-Retrieval logic (``search``) is factored out from the FastMCP tool wiring and
+Retrieval logic (``search``) is factored out from the MCPServer tool wiring and
 takes an injectable ``embed_query`` function and Qdrant client, so
 ``tests/test_server.py`` can exercise the real query path against an
 embedded (``:memory:``) Qdrant instance with a fake embedder — no Docker, no
@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import voyageai
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from qdrant_client import QdrantClient
 from qdrant_client.models import ScoredPoint
 
@@ -82,14 +82,14 @@ def build_server(
     *,
     qdrant: QdrantClient | None = None,
     embed_query: EmbedQueryFn | None = None,
-) -> FastMCP:
-    """Build the FastMCP server. ``qdrant``/``embed_query`` overrides are test-only hooks."""
+) -> MCPServer:
+    """Build the MCP server. ``qdrant``/``embed_query`` overrides are test-only hooks."""
     qdrant = qdrant or QdrantClient(url=config.qdrant_url)
     if embed_query is None:
         voyage = voyageai.Client(api_key=config.voyage_api_key)
         embed_query = make_voyage_embed_query(voyage, config.voyage_model)
 
-    mcp = FastMCP("mathforge-mathkb")
+    mcp = MCPServer("mathforge-mathkb")
 
     @mcp.tool()
     def search_math_knowledge(query: str, top_k: int = DEFAULT_TOP_K) -> str:
