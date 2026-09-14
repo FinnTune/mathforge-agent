@@ -21,6 +21,30 @@ services:
       - "4317:4317" # OTLP/gRPC receiver — agent/gateway export spans here
       - "4318:4318" # OTLP/HTTP receiver (unused; exposed for parity)
 
+  # Scrapes gateway-rs's Prometheus /metrics — see observability/prometheus/.
+  # No published port: only gateway (scrape target) and grafana (datasource)
+  # need to reach it, both over the compose network.
+  prometheus:
+    image: prom/prometheus:v3.9.1
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  # Dashboards over the Prometheus metrics above — datasource + dashboard
+  # are both auto-provisioned (observability/grafana/provisioning/), so
+  # logging in is the only manual step. See README "Observability".
+  grafana:
+    image: grafana/grafana:12.3.0
+    env_file: .env
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+
   # agent-core + both MCP servers (spawned as its stdio subprocesses — see
   # agent-core/Dockerfile for why they're one image, not three).
   agent:

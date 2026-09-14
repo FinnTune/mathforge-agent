@@ -1,0 +1,10 @@
+# Scrapes gateway-rs's hand-rolled Prometheus endpoint (see
+# gateway-rs/src/metrics.rs). "gateway" resolves via Docker Compose's
+# automatic per-service DNS alias — no extra networking config needed.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: mathforge-gateway
+    static_configs:
+      - targets: ["gateway:9090"]
