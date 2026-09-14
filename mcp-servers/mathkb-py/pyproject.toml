@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "MCP server exposing search_math_knowledge (Qdrant + Voyage embeddings)"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp==1.30.0",
+    "mcp==2.2.0",
     "qdrant-client==1.19.0",
     "voyageai==0.5.0",
     # See agent-core/pyproject.toml's identical pin for why this is needed
