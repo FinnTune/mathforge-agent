@@ -21,7 +21,7 @@ dependencies = [
     # langchain-mcp-adapters pulls in a newer langchain-core than the previous
     # exact pin (1.3.0); range verified compatible with langgraph/anthropic above.
     "langchain-core>=1.6.2,<2",
-    "python-dotenv==1.2.2",
+    "python-dotenv==1.2.3",
     "discord.py>=2.4,<3",
     # MCP client: loads tools (sandbox + mathkb servers) as LangChain tools.
     "langchain-mcp-adapters==0.3.2",
