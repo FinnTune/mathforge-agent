@@ -16,12 +16,12 @@ requires-python = ">=3.11"
 dependencies = [
     # Agent runtime: LangGraph (hand-rolled planner/tools/verifier/responder
     # graph, see agent.py) + Anthropic chat model.
-    "langgraph==1.1.8",
+    "langgraph==1.2.11",
     "langchain-anthropic==1.4.6",
     # langchain-mcp-adapters pulls in a newer langchain-core than the previous
     # exact pin (1.3.0); range verified compatible with langgraph/anthropic above.
     "langchain-core>=1.6.2,<2",
-    "python-dotenv==1.2.2",
+    "python-dotenv==1.2.3",
     "discord.py>=2.4,<3",
     # MCP client: loads tools (sandbox + mathkb servers) as LangChain tools.
     "langchain-mcp-adapters==0.3.2",
@@ -35,6 +35,15 @@ dependencies = [
     # do real work (export spans) when MATHFORGE_OTLP_ENDPOINT is set.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    # Not something this project imports — pinned because `[build-system]
+    # requires` above only governs pip's *isolated build* environment, not
+    # the target env `pip install -e .` installs into; an ambient setuptools
+    # already present there (e.g. whatever a given Python's base image
+    # ships) is untouched by that floor and pip-audit correctly flags it as
+    # a real supply-chain risk on its own. Verified: without this, CI's
+    # Python 3.11 leg installs with setuptools 79.0.1 present
+    # (PYSEC-2026-3447); with it, pip upgrades it and pip-audit is clean.
+    "setuptools>=83",
 ]
 
 [project.optional-dependencies]

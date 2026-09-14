@@ -14,6 +14,12 @@ dependencies = [
     "mcp==1.30.0",
     "qdrant-client==1.19.0",
     "voyageai==0.5.0",
+    # See agent-core/pyproject.toml's identical pin for why this is needed
+    # despite not being imported: `[build-system] requires` above doesn't
+    # upgrade an already-present setuptools in the target env, so an old
+    # ambient one (e.g. CI's Python 3.11) stays vulnerable (PYSEC-2026-3447)
+    # unless pinned here too. Verified fixed on the same repro that found it.
+    "setuptools>=83",
 ]
 
 [project.optional-dependencies]
