@@ -9,10 +9,10 @@
 # here — it's only needed by the Python interpreter the Rust sandbox server
 # invokes (MATHFORGE_SANDBOX_PYTHON); see mcp-servers/sandbox-rs/requirements.txt.
 
-langgraph==1.1.8
+langgraph==1.2.11
 langchain-anthropic==1.4.1
 langchain-core>=1.6.2,<2
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 discord.py>=2.4,<3
 langchain-mcp-adapters==0.3.2
 langgraph-checkpoint-sqlite==3.1.1

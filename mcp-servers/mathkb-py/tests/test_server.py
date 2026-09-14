@@ -9,6 +9,7 @@ the embedding call is faked.
 from __future__ import annotations
 
 import math
+import zlib
 
 import pytest
 from qdrant_client import QdrantClient
@@ -20,10 +21,21 @@ EMBED_DIM = 16
 
 
 def fake_embed(text: str) -> list[float]:
-    """Deterministic hashing-trick bag-of-words embedding for tests only."""
+    """Deterministic hashing-trick bag-of-words embedding for tests only.
+
+    Uses `zlib.crc32`, not the builtin `hash()` — `hash()` on `str` is
+    randomized per-process by default (PYTHONHASHSEED, since Python 3.3's
+    hash-DoS mitigation), so it silently was *not* actually deterministic
+    across runs despite the docstring's claim. With only 3 tiny documents
+    hashed into 16 buckets, an unlucky per-run seed could occasionally
+    collide two documents' dominant words into the same bucket and flip
+    which one search ranks first — caught for real when CI hit exactly
+    that on a Python 3.11 run (test_search_returns_most_relevant_chunk_first
+    failed with calculus_and_integration.md outranking linear_algebra.md).
+    """
     vector = [0.0] * EMBED_DIM
     for word in text.lower().split():
-        vector[hash(word) % EMBED_DIM] += 1.0
+        vector[zlib.crc32(word.encode()) % EMBED_DIM] += 1.0
     norm = math.sqrt(sum(v * v for v in vector)) or 1.0
     return [v / norm for v in vector]
 
