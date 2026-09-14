@@ -35,6 +35,15 @@ dependencies = [
     # do real work (export spans) when MATHFORGE_OTLP_ENDPOINT is set.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    # Not something this project imports — pinned because `[build-system]
+    # requires` above only governs pip's *isolated build* environment, not
+    # the target env `pip install -e .` installs into; an ambient setuptools
+    # already present there (e.g. whatever a given Python's base image
+    # ships) is untouched by that floor and pip-audit correctly flags it as
+    # a real supply-chain risk on its own. Verified: without this, CI's
+    # Python 3.11 leg installs with setuptools 79.0.1 present
+    # (PYSEC-2026-3447); with it, pip upgrades it and pip-audit is clean.
+    "setuptools>=83",
 ]
 
 [project.optional-dependencies]
