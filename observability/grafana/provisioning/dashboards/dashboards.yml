@@ -1,0 +1,8 @@
+# Auto-loads every dashboard JSON in ../../dashboards/ on Grafana startup —
+# no manual "Import dashboard" step needed.
+apiVersion: 1
+providers:
+  - name: mathforge
+    type: file
+    options:
+      path: /etc/grafana/dashboards

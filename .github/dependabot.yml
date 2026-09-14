@@ -1,0 +1,38 @@
+# Automated dependency update PRs, weekly. Complements the cargo audit /
+# pip-audit CI checks (.github/workflows/ci.yml): those fail a push on a
+# disclosed CVE; this proactively opens PRs to stay ahead of one.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /gateway-rs
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /mcp-servers/sandbox-rs
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /agent-core
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /mcp-servers/mathkb-py
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Picks up the exactly-pinned qdrant/jaeger images in docker-compose.yml.
+  # agent-core/Dockerfile and gateway-rs/Dockerfile use floating base tags
+  # (rust:1-slim-bookworm, python:3.12-slim-bookworm) by design, so this
+  # gets less mileage there, but it's harmless to include.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

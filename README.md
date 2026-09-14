@@ -47,8 +47,10 @@ proto/chat.proto      gRPC service definition — agent-core's server + clients
 gateway-rs/           Rust gRPC gateway (tonic) — optional auth + rate
                        limiting in front of grpc_server.py (see below)
 scripts/              Codegen (generate_proto.sh) and dev-cert (generate_dev_certs.sh) helpers
-docker-compose.yml    Full stack: Qdrant, Jaeger, agent, gateway, plus
-                       one-off ingest/cli services — see "Quick start"
+observability/        Prometheus scrape config + provisioned Grafana
+                       datasource/dashboard — see "Observability"
+docker-compose.yml    Full stack: Qdrant, Jaeger, Prometheus, Grafana, agent,
+                       gateway, plus one-off ingest/cli services
 ```
 
 Within `agent-core`, `grpc_server.py` builds the agent graph once (loading
@@ -353,6 +355,20 @@ on regardless of tracing) with per-outcome request counters:
 ```bash
 curl localhost:9090/metrics
 ```
+
+A `prometheus` + `grafana` pair (`observability/`) turns those counters into
+an actual dashboard instead of raw text — both fully provisioned (datasource
+and dashboard auto-loaded on startup, no manual clicking):
+
+```bash
+docker compose up -d prometheus grafana
+```
+
+Open `http://localhost:3000`, log in (`admin` / `$GRAFANA_ADMIN_PASSWORD`,
+defaults to `admin`/`admin` if unset — change it if this ever ends up
+reachable beyond localhost), and the "MathForge Gateway" dashboard is
+already there: total requests, unauthenticated/rate-limited rejections, and
+a live request-rate graph.
 
 ## RAG knowledge base
 

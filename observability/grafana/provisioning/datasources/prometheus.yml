@@ -1,0 +1,12 @@
+# Auto-provisions the Prometheus datasource on Grafana startup — no manual
+# "Add data source" click needed. `uid: prometheus` is load-bearing: Grafana
+# panels reference a datasource by this exact uid (see
+# ../../dashboards/mathforge-gateway.json), not by name.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

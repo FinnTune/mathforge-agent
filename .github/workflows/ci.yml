@@ -26,6 +26,12 @@ jobs:
       # Editable install pulls runtime + dev deps (incl. grpcio-tools) from pyproject.toml.
       - name: Install
         run: pip install -e ".[dev]"
+      # Fails the build on a disclosed CVE in any installed dependency —
+      # --local audits exactly the env `pip install` above just built.
+      - name: Audit dependencies
+        run: |
+          pip install pip-audit
+          pip-audit --local
       # Generated stubs are gitignored — regenerate before lint/test, same as
       # the Rust sandbox binary is built before its own tests below.
       - name: Generate protobuf/gRPC stubs
@@ -59,6 +65,13 @@ jobs:
         run: |
           python3 -m venv .venv-sandbox-test
           .venv-sandbox-test/bin/pip install -r requirements.txt
+      # Prebuilt binary via taiki-e/install-action — compiling cargo-audit
+      # from source on every run is slow; this installs a release instead.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
@@ -84,6 +97,11 @@ jobs:
       # PATH — recent prost-build no longer vendors/downloads one itself.
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       # No Python/Docker dependency — the fake upstream in tests/ is pure Rust.
@@ -133,6 +151,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: pip install -e ".[dev]"
+      - name: Audit dependencies
+        run: |
+          pip install pip-audit
+          pip-audit --local
       - name: Ruff
         run: ruff check .
       # No Docker/Qdrant and no VOYAGE_API_KEY needed: tests use qdrant-client's
