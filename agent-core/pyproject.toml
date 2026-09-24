@@ -29,7 +29,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite==3.1.1",
     # gRPC: grpc_server.py serves the agent; main.py/discord_bot.py are thin
     # clients (see proto/chat.proto). Generated stubs: scripts/generate_proto.sh.
-    "grpcio==1.83.1",
+    "grpcio==1.84.0",
     # Distributed tracing (see telemetry.py) — the plain opentelemetry-api's
     # default tracer is a safe no-op, so these are always imported but only
     # do real work (export spans) when MATHFORGE_OTLP_ENDPOINT is set.
