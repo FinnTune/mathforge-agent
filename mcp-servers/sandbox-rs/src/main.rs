@@ -9,7 +9,7 @@
 //! stdout is reserved for MCP JSON-RPC traffic — all logging goes to stderr.
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::ServerInfo;
+use rmcp::model::ServerConfig;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use mathforge_sandbox_mcp::config::Config;
@@ -54,8 +54,8 @@ impl Sandbox {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Sandbox {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.instructions = Some(
             "Executes model-generated Python for math/coding tasks in a hardened sandbox."
                 .to_string(),
