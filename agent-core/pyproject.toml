@@ -33,7 +33,7 @@ dependencies = [
     # Distributed tracing (see telemetry.py) — the plain opentelemetry-api's
     # default tracer is a safe no-op, so these are always imported but only
     # do real work (export spans) when MATHFORGE_OTLP_ENDPOINT is set.
-    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-sdk==1.45.0",
     "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
     # Not something this project imports — pinned because `[build-system]
     # requires` above only governs pip's *isolated build* environment, not
