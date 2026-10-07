@@ -10,9 +10,9 @@
 # invokes (MATHFORGE_SANDBOX_PYTHON); see mcp-servers/sandbox-rs/requirements.txt.
 
 langgraph==1.2.12
-langchain-anthropic==1.7.4
+langchain-anthropic==1.7.5
 langchain-core>=1.6.2,<2
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 discord.py>=2.4,<3
 langchain-mcp-adapters==0.3.2
 langgraph-checkpoint-sqlite==3.1.1
