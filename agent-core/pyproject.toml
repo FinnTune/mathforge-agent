@@ -26,7 +26,7 @@ dependencies = [
     # MCP client: loads tools (sandbox + mathkb servers) as LangChain tools.
     "langchain-mcp-adapters==0.3.2",
     # Persistent (SQLite-backed) LangGraph checkpointer — see checkpointer.py.
-    "langgraph-checkpoint-sqlite==3.1.1",
+    "langgraph-checkpoint-sqlite==3.1.2",
     # gRPC: grpc_server.py serves the agent; main.py/discord_bot.py are thin
     # clients (see proto/chat.proto). Generated stubs: scripts/generate_proto.sh.
     "grpcio==1.84.0",
